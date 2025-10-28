@@ -57,6 +57,10 @@ def main():
     # Add max_abstraction_num parameter to control the number of abstractions
     parser.add_argument("--max-abstractions", type=int, default=10, help="Maximum number of abstractions to identify (default: 10)")
 
+    # Jekyll front matter configuration
+    parser.add_argument("--no-jekyll", action="store_true", help="Disable Jekyll front matter generation (default: enabled)")
+    parser.add_argument("--jekyll-nav-order", type=int, default=1, help="Navigation order for the tutorial in Jekyll (default: 1)")
+
     args = parser.parse_args()
 
     # Get GitHub token from argument or environment variable if using repo
@@ -88,6 +92,10 @@ def main():
         # Add max_abstraction_num parameter
         "max_abstraction_num": args.max_abstractions,
 
+        # Jekyll configuration
+        "enable_jekyll": not args.no_jekyll,
+        "jekyll_nav_order": args.jekyll_nav_order,
+
         # Outputs will be populated by the nodes
         "files": [],
         "abstractions": [],
@@ -100,6 +108,7 @@ def main():
     # Display starting message with repository/directory and language
     print(f"Starting tutorial generation for: {args.repo or args.dir} in {args.language.capitalize()} language")
     print(f"LLM caching: {'Disabled' if args.no_cache else 'Enabled'}")
+    print(f"Jekyll front matter: {'Disabled' if args.no_jekyll else 'Enabled (nav_order=' + str(args.jekyll_nav_order) + ')'}")
 
     # Create the flow instance
     tutorial_flow = create_tutorial_flow()

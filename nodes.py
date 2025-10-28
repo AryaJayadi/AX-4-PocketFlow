@@ -3,11 +3,142 @@ import re
 import yaml
 from pocketflow import Node, BatchNode
 from utils.crawl_github_files import crawl_github_files
-from utils.call_llm import call_llm
+from utils.call_llm import (
+    call_llm,
+    get_smart_context,
+    optimize_context_for_budget,
+    estimate_tokens,
+)
 from utils.crawl_local_files import crawl_local_files
 
+try:
+    from dotenv import load_dotenv
 
-# Helper to get content for specific file indices
+    load_dotenv()  # loads variables from a .env file into os.environ
+except Exception:
+    pass
+
+
+# Token budgets for different operations (tunable based on model context limits)
+# Smart calculation: Always calculate from TPM limit to maximize usage
+def _calculate_smart_token_budget():
+    """
+    Calculate optimal token budget based on TPM limit and expected output.
+    Formula: file_content_budget = (TPM_LIMIT - output_tokens - overhead) * safety_margin
+
+    This ensures the total request (input + output) fits within TPM limit.
+    """
+    # OPENAI_TPM_LIMIT is used as the CONTEXT WINDOW limit (max prompt + output size)
+    # For Claude models, this is typically 200k tokens
+    context_limit = int(os.getenv("OPENAI_TPM_LIMIT", "450000"))
+    max_output_tokens = int(os.getenv("LLM_MAX_TOKENS", "8192"))
+
+    # Claude's context limit includes BOTH input and output
+    # So: input_tokens + max_tokens <= context_limit
+    # Therefore: max_input = context_limit - max_tokens
+    max_input_size = context_limit - max_output_tokens
+
+    # Prompt overhead includes:
+    # - Prompt template text (~8k tokens)
+    # - System instructions (~5k tokens)
+    # - File listing (path names, ~2-3k per 100 files, varies with file count)
+    # - YAML output format instructions (~2k tokens)
+    # - Extra formatting, whitespace, separators (~10k tokens)
+    # - Language instructions and hints (~5k tokens)
+    # Measured from actual errors: ~60-70k tokens overhead for large codebases
+    # Conservative estimate: 65,000 tokens
+    prompt_overhead = 65000
+
+    # Calculate available tokens for file content
+    # Total input = file_content + prompt_overhead
+    # Must satisfy: file_content + prompt_overhead <= max_input_size
+    available_for_content = max_input_size - prompt_overhead
+
+    # Apply 80% safety margin to account for:
+    # - Token estimation inaccuracies (tiktoken vs actual API tokenizer)
+    # - Optimization algorithm going slightly over budget
+    # - Extra formatting/whitespace in optimization
+    # - Variation in prompt size based on inputs
+    # - Higher overhead for codebases with many files (longer file listings)
+    safe_budget = int(available_for_content * 0.80)
+
+    # If user explicitly sets TOKEN_BUDGET_IDENTIFY, respect it (but warn if too high)
+    explicit_budget = os.getenv("TOKEN_BUDGET_IDENTIFY")
+    if explicit_budget:
+        explicit_value = int(explicit_budget)
+        if explicit_value > safe_budget:
+            print(
+                f"⚠️  Warning: TOKEN_BUDGET_IDENTIFY ({explicit_value:,}) exceeds safe budget ({safe_budget:,})"
+            )
+            print(
+                f"    Calculated from: CONTEXT_LIMIT={context_limit:,} - overhead={prompt_overhead:,}"
+            )
+            print(f"    Using TPM-based budget instead: {safe_budget:,} tokens")
+            return safe_budget
+        return explicit_value
+
+    return safe_budget
+
+
+TOKEN_BUDGETS = {
+    "identify_abstractions": _calculate_smart_token_budget(),  # Auto-calculated from TPM limit
+    "analyze_relationships": int(
+        os.getenv("TOKEN_BUDGET_RELATIONSHIPS", "15000")
+    ),  # For relationship analysis
+    "write_chapter": int(
+        os.getenv("TOKEN_BUDGET_CHAPTER", "12000")
+    ),  # For individual chapter context
+}
+
+
+def extract_yaml_from_response(response: str) -> str:
+    """
+    Robustly extract YAML content from LLM response.
+    Tries multiple strategies to handle different response formats.
+
+    Args:
+        response: LLM response string
+
+    Returns:
+        Extracted YAML string
+
+    Raises:
+        ValueError: If YAML cannot be extracted
+    """
+    yaml_str = None
+
+    # Strategy 1: Look for ```yaml markers
+    if "```yaml" in response:
+        try:
+            yaml_str = response.strip().split("```yaml")[1].split("```")[0].strip()
+        except IndexError:
+            pass
+
+    # Strategy 2: Look for ``` markers without language specifier
+    if not yaml_str and "```" in response:
+        try:
+            parts = response.split("```")
+            if len(parts) >= 3:
+                yaml_str = parts[1].strip()
+                # Remove language identifier if present
+                if yaml_str.startswith("yaml\n") or yaml_str.startswith("yml\n"):
+                    yaml_str = "\n".join(yaml_str.split("\n")[1:])
+        except Exception:
+            pass
+
+    # Strategy 3: Assume entire response is YAML (no code blocks)
+    if not yaml_str:
+        yaml_str = response.strip()
+
+    if not yaml_str:
+        raise ValueError(
+            f"Could not extract YAML from LLM response. Response preview: {response[:500]}"
+        )
+
+    return yaml_str
+
+
+# Helper to get content for specific file indices (LEGACY - kept for backward compatibility)
 def get_content_for_indices(files_data, indices):
     content_map = {}
     for i in indices:
@@ -17,6 +148,108 @@ def get_content_for_indices(files_data, indices):
                 content  # Use index + path as key for context
             )
     return content_map
+
+
+# Optimized helper that uses smart context reduction
+def get_optimized_content_for_indices(
+    files_data, indices, token_budget=8000, priority_keywords=None
+):
+    """
+    Get optimized content for file indices with intelligent chunking and structure extraction.
+
+    Args:
+        files_data: List of (path, content) tuples
+        indices: File indices to include
+        token_budget: Maximum tokens to use (default: 8000)
+        priority_keywords: Keywords to prioritize certain files
+
+    Returns:
+        Optimized context string
+    """
+    return get_smart_context(
+        files_data=files_data,
+        indices=indices,
+        token_budget=token_budget,
+        priority_keywords=priority_keywords,
+    )
+
+
+def generate_jekyll_front_matter(
+    title, nav_order=None, parent=None, has_children=False, layout="default"
+):
+    """
+    Generate Jekyll front matter YAML for documentation files.
+
+    Args:
+        title: Page title
+        nav_order: Navigation order number (optional)
+        parent: Parent page title (optional, for child pages)
+        has_children: Whether this page has child pages (default: False)
+        layout: Jekyll layout to use (default: "default")
+
+    Returns:
+        YAML front matter string with surrounding --- delimiters
+    """
+    front_matter = ["---"]
+    front_matter.append(f"layout: {layout}")
+    front_matter.append(f'title: "{title}"')
+
+    if nav_order is not None:
+        front_matter.append(f"nav_order: {nav_order}")
+
+    if parent:
+        front_matter.append(f'parent: "{parent}"')
+
+    if has_children:
+        front_matter.append("has_children: true")
+
+    front_matter.append("---")
+
+    return "\n".join(front_matter) + "\n\n"
+
+
+def clean_title_from_filename(filename):
+    """
+    Extract a clean title from a chapter filename.
+
+    Args:
+        filename: Filename like "01_shared_state___shared__dictionary__.md"
+
+    Returns:
+        Clean title like "Shared State (Shared Dictionary)"
+    """
+    # Remove file extension
+    name = filename.rsplit(".", 1)[0]
+
+    # Remove chapter number prefix (e.g., "01_")
+    if "_" in name:
+        parts = name.split("_", 1)
+        if parts[0].isdigit() and len(parts[0]) <= 2:
+            name = parts[1] if len(parts) > 1 else parts[0]
+
+    # Replace triple underscores with " (" marker
+    name = name.replace("___", "§§§PAREN_OPEN§§§")
+
+    # Replace double underscores with ")" marker
+    name = name.replace("__", "§§§PAREN_CLOSE§§§")
+
+    # Replace single underscores with spaces
+    name = name.replace("_", " ")
+
+    # Capitalize words
+    name = " ".join(word.capitalize() for word in name.split())
+
+    # Now replace the markers with actual parentheses (after capitalization)
+    name = name.replace("§§§paren Open§§§", " (")
+    name = name.replace("§§§paren_open§§§", " (")
+    name = name.replace("§§§Paren_open§§§", " (")
+    name = name.replace("§§§Paren Open§§§", " (")
+    name = name.replace("§§§paren Close§§§", ")")
+    name = name.replace("§§§paren_close§§§", ")")
+    name = name.replace("§§§Paren_close§§§", ")")
+    name = name.replace("§§§Paren Close§§§", ")")
+
+    return name
 
 
 class FetchRepo(Node):
@@ -67,7 +300,7 @@ class FetchRepo(Node):
                 include_patterns=prep_res["include_patterns"],
                 exclude_patterns=prep_res["exclude_patterns"],
                 max_file_size=prep_res["max_file_size"],
-                use_relative_paths=prep_res["use_relative_paths"]
+                use_relative_paths=prep_res["use_relative_paths"],
             )
 
         # Convert dict to list of tuples: [(path, content), ...]
@@ -85,22 +318,37 @@ class IdentifyAbstractions(Node):
     def prep(self, shared):
         files_data = shared["files"]
         project_name = shared["project_name"]  # Get project name
-        language = shared.get("language", "english")  # Get language
+        language = shared.get("language", "Bahasa Indonesia")  # Get language
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
-        max_abstraction_num = shared.get("max_abstraction_num", 10)  # Get max_abstraction_num, default to 10
+        max_abstraction_num = shared.get(
+            "max_abstraction_num", 100
+        )  # Get max_abstraction_num, default to 10
 
-        # Helper to create context from files, respecting limits (basic example)
-        def create_llm_context(files_data):
-            context = ""
-            file_info = []  # Store tuples of (index, path)
-            for i, (path, content) in enumerate(files_data):
-                entry = f"--- File Index {i}: {path} ---\n{content}\n\n"
-                context += entry
-                file_info.append((i, path))
+        # OPTIMIZED: Create smart context from files with token budget management
+        token_budget = TOKEN_BUDGETS["identify_abstractions"]
 
-            return context, file_info  # file_info is list of (index, path)
+        # Build file content map
+        files_content_map = {}
+        file_info = []
+        for i, (path, content) in enumerate(files_data):
+            files_content_map[f"{i} # {path}"] = content
+            file_info.append((i, path))
 
-        context, file_info = create_llm_context(files_data)
+        # Optimize context to fit within budget, prioritizing important files
+        priority_keywords = ["main", "core", "app", "index", "init", "base", "api"]
+        context = optimize_context_for_budget(
+            files_content_map,
+            token_budget=token_budget,
+            use_structure_for_large=True,
+            priority_keywords=priority_keywords,
+        )
+
+        # Estimate tokens and log
+        actual_tokens = estimate_tokens(context)
+        print(
+            f"Context optimization: {len(files_data)} files -> {actual_tokens}/{token_budget} tokens ({actual_tokens * 100 // token_budget}% of budget)"
+        )
+
         # Format file info for the prompt (comment is just a hint for LLM)
         file_listing_for_prompt = "\n".join(
             [f"- {idx} # {path}" for idx, path in file_info]
@@ -173,11 +421,19 @@ Format the output as a YAML list of dictionaries:
     - 5 # path/to/another.js
 # ... up to {max_abstraction_num} abstractions
 ```"""
-        response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0))  # Use cache only if enabled and not retrying
+        response = call_llm(
+            prompt, use_cache=(use_cache and self.cur_retry == 0)
+        )  # Use cache only if enabled and not retrying
 
-        # --- Validation ---
-        yaml_str = response.strip().split("```yaml")[1].split("```")[0].strip()
-        abstractions = yaml.safe_load(yaml_str)
+        # --- Validation with robust YAML extraction ---
+        yaml_str = extract_yaml_from_response(response)
+
+        try:
+            abstractions = yaml.safe_load(yaml_str)
+        except yaml.YAMLError as e:
+            raise ValueError(
+                f"Failed to parse YAML: {e}\nYAML string: {yaml_str[:500]}"
+            )
 
         if not isinstance(abstractions, list):
             raise ValueError("LLM Output is not a list")
@@ -266,21 +522,26 @@ class AnalyzeRelationships(Node):
             all_relevant_indices.update(abstr["files"])
 
         context += "\\nRelevant File Snippets (Referenced by Index and Path):\\n"
-        # Get content for relevant files using helper
-        relevant_files_content_map = get_content_for_indices(
-            files_data, sorted(list(all_relevant_indices))
-        )
-        # Format file content for context
-        file_context_str = "\\n\\n".join(
-            f"--- File: {idx_path} ---\\n{content}"
-            for idx_path, content in relevant_files_content_map.items()
+        # OPTIMIZED: Get smart content for relevant files with token budget
+        token_budget = TOKEN_BUDGETS["analyze_relationships"]
+        file_context_str = get_optimized_content_for_indices(
+            files_data,
+            sorted(list(all_relevant_indices)),
+            token_budget=token_budget,
+            priority_keywords=["main", "core", "base", "api"],
         )
         context += file_context_str
+
+        # Log token usage
+        total_tokens = estimate_tokens(context)
+        print(
+            f"Relationship context: {len(all_relevant_indices)} files -> {total_tokens} tokens"
+        )
 
         return (
             context,
             "\n".join(abstraction_info_for_prompt),
-            num_abstractions, # Pass the actual count
+            num_abstractions,  # Pass the actual count
             project_name,
             language,
             use_cache,
@@ -290,11 +551,11 @@ class AnalyzeRelationships(Node):
         (
             context,
             abstraction_listing,
-            num_abstractions, # Receive the actual count
+            num_abstractions,  # Receive the actual count
             project_name,
             language,
             use_cache,
-         ) = prep_res  # Unpack use_cache
+        ) = prep_res  # Unpack use_cache
         print(f"Analyzing relationships using LLM...")
 
         # Add language instruction and hints only if not English
@@ -344,11 +605,18 @@ relationships:
 
 Now, provide the YAML output:
 """
-        response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0)) # Use cache only if enabled and not retrying
+        response = call_llm(
+            prompt, use_cache=(use_cache and self.cur_retry == 0)
+        )  # Use cache only if enabled and not retrying
 
         # --- Validation ---
-        yaml_str = response.strip().split("```yaml")[1].split("```")[0].strip()
-        relationships_data = yaml.safe_load(yaml_str)
+        yaml_str = extract_yaml_from_response(response)
+        try:
+            relationships_data = yaml.safe_load(yaml_str)
+        except yaml.YAMLError as e:
+            raise ValueError(
+                f"Failed to parse YAML: {e}\nYAML string: {yaml_str[:500]}"
+            )
 
         if not isinstance(relationships_data, dict) or not all(
             k in relationships_data for k in ["summary", "relationships"]
@@ -383,7 +651,7 @@ Now, provide the YAML output:
                     0 <= from_idx < num_abstractions and 0 <= to_idx < num_abstractions
                 ):
                     raise ValueError(
-                        f"Invalid index in relationship: from={from_idx}, to={to_idx}. Max index is {num_abstractions-1}."
+                        f"Invalid index in relationship: from={from_idx}, to={to_idx}. Max index is {num_abstractions - 1}."
                     )
                 validated_relationships.append(
                     {
@@ -486,11 +754,18 @@ Output the ordered list of abstraction indices, including the name in a comment 
 
 Now, provide the YAML output:
 """
-        response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0)) # Use cache only if enabled and not retrying
+        response = call_llm(
+            prompt, use_cache=(use_cache and self.cur_retry == 0)
+        )  # Use cache only if enabled and not retrying
 
         # --- Validation ---
-        yaml_str = response.strip().split("```yaml")[1].split("```")[0].strip()
-        ordered_indices_raw = yaml.safe_load(yaml_str)
+        yaml_str = extract_yaml_from_response(response)
+        try:
+            ordered_indices_raw = yaml.safe_load(yaml_str)
+        except yaml.YAMLError as e:
+            raise ValueError(
+                f"Failed to parse YAML: {e}\nYAML string: {yaml_str[:500]}"
+            )
 
         if not isinstance(ordered_indices_raw, list):
             raise ValueError("LLM output is not a list")
@@ -508,7 +783,7 @@ Now, provide the YAML output:
 
                 if not (0 <= idx < num_abstractions):
                     raise ValueError(
-                        f"Invalid index {idx} in ordered list. Max index is {num_abstractions-1}."
+                        f"Invalid index {idx} in ordered list. Max index is {num_abstractions - 1}."
                     )
                 if idx in seen_indices:
                     raise ValueError(f"Duplicate index {idx} found in ordered list.")
@@ -548,9 +823,7 @@ class WriteChapters(BatchNode):
         # Get already written chapters to provide context
         # We store them temporarily during the batch run, not in shared memory yet
         # The 'previous_chapters_summary' will be built progressively in the exec context
-        self.chapters_written_so_far = (
-            []
-        )  # Use instance variable for temporary storage across exec calls
+        self.chapters_written_so_far = []  # Use instance variable for temporary storage across exec calls
 
         # Create a complete list of all chapters
         all_chapters = []
@@ -565,7 +838,7 @@ class WriteChapters(BatchNode):
                 safe_name = "".join(
                     c if c.isalnum() else "_" for c in chapter_name
                 ).lower()
-                filename = f"{i+1:02d}_{safe_name}.md"
+                filename = f"{i + 1:02d}_{safe_name}.md"
                 # Format with link (using potentially translated name)
                 all_chapters.append(f"{chapter_num}. [{chapter_name}]({filename})")
                 # Store mapping of chapter index to filename for linking
@@ -586,10 +859,6 @@ class WriteChapters(BatchNode):
                 ]  # Contains potentially translated name/desc
                 # Use 'files' (list of indices) directly
                 related_file_indices = abstraction_details.get("files", [])
-                # Get content using helper, passing indices
-                related_files_content_map = get_content_for_indices(
-                    files_data, related_file_indices
-                )
 
                 # Get previous chapter info for transitions (uses potentially translated name)
                 prev_chapter = None
@@ -608,14 +877,15 @@ class WriteChapters(BatchNode):
                         "chapter_num": i + 1,
                         "abstraction_index": abstraction_index,
                         "abstraction_details": abstraction_details,  # Has potentially translated name/desc
-                        "related_files_content_map": related_files_content_map,
+                        "related_file_indices": related_file_indices,  # OPTIMIZED: Store indices not content
+                        "files_data": files_data,  # Pass files_data for optimization in exec
                         "project_name": shared["project_name"],  # Add project name
                         "full_chapter_listing": full_chapter_listing,  # Add the full chapter listing (uses potentially translated names)
                         "chapter_filenames": chapter_filenames,  # Add chapter filenames mapping (uses potentially translated names)
                         "prev_chapter": prev_chapter,  # Add previous chapter info (uses potentially translated name)
                         "next_chapter": next_chapter,  # Add next chapter info (uses potentially translated name)
                         "language": language,  # Add language for multi-language support
-                        "use_cache": use_cache, # Pass use_cache flag
+                        "use_cache": use_cache,  # Pass use_cache flag
                         # previous_chapters_summary will be added dynamically in exec
                     }
                 )
@@ -638,13 +908,24 @@ class WriteChapters(BatchNode):
         chapter_num = item["chapter_num"]
         project_name = item.get("project_name")
         language = item.get("language", "english")
-        use_cache = item.get("use_cache", True) # Read use_cache from item
+        use_cache = item.get("use_cache", True)  # Read use_cache from item
         print(f"Writing chapter {chapter_num} for: {abstraction_name} using LLM...")
 
-        # Prepare file context string from the map
-        file_context_str = "\n\n".join(
-            f"--- File: {idx_path.split('# ')[1] if '# ' in idx_path else idx_path} ---\n{content}"
-            for idx_path, content in item["related_files_content_map"].items()
+        # OPTIMIZED: Prepare file context string using smart optimization
+        token_budget = TOKEN_BUDGETS["write_chapter"]
+        file_context_str = get_optimized_content_for_indices(
+            item["files_data"],
+            item["related_file_indices"],
+            token_budget=token_budget,
+            priority_keywords=[
+                abstraction_name.lower().split()[0]
+            ],  # Prioritize files matching abstraction name
+        )
+
+        # Log token usage for this chapter
+        context_tokens = estimate_tokens(file_context_str)
+        print(
+            f"  Chapter {chapter_num} context: {len(item['related_file_indices'])} files -> {context_tokens}/{token_budget} tokens"
         )
 
         # Get summary of chapters written *before* this one
@@ -723,7 +1004,9 @@ Instructions for the chapter (Generate content in {language.capitalize()} unless
 
 Now, directly provide a super beginner-friendly Markdown output (DON'T need ```markdown``` tags):
 """
-        chapter_content = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0)) # Use cache only if enabled and not retrying
+        chapter_content = call_llm(
+            prompt, use_cache=(use_cache and self.cur_retry == 0)
+        )  # Use cache only if enabled and not retrying
         # Basic validation/cleanup
         actual_heading = f"# Chapter {chapter_num}: {abstraction_name}"  # Use potentially translated name
         if not chapter_content.strip().startswith(f"# Chapter {chapter_num}"):
@@ -756,7 +1039,14 @@ class CombineTutorial(Node):
         output_base_dir = shared.get("output_dir", "output")  # Default output dir
         output_path = os.path.join(output_base_dir, project_name)
         repo_url = shared.get("repo_url")  # Get the repository URL
-        # language = shared.get("language", "english") # No longer needed for fixed strings
+
+        # Jekyll configuration
+        enable_jekyll = shared.get(
+            "enable_jekyll", True
+        )  # Enable Jekyll front matter by default
+        jekyll_nav_order = shared.get(
+            "jekyll_nav_order", 1
+        )  # Default nav order for the project
 
         # Get potentially translated data
         relationships_data = shared[
@@ -799,11 +1089,25 @@ class CombineTutorial(Node):
         mermaid_diagram = "\n".join(mermaid_lines)
         # --- End Mermaid ---
 
-        # --- Prepare index.md content ---
-        index_content = f"# Tutorial: {project_name}\n\n"
+        # --- Prepare index.md content with Jekyll front matter ---
+        index_content = ""
+
+        # Add Jekyll front matter for index if enabled
+        if enable_jekyll:
+            index_content += generate_jekyll_front_matter(
+                title=project_name, nav_order=jekyll_nav_order, has_children=True
+            )
+
+        index_content += f"# Tutorial: {project_name}\n\n"
+
+        # Add AI-generated notice
+        if enable_jekyll:
+            index_content += f"> This tutorial is AI-generated! To learn more, check out [AI Codebase Knowledge Builder](https://github.com/The-Pocket/Tutorial-Codebase-Knowledge)\n\n"
+
         index_content += f"{relationships_data['summary']}\n\n"  # Use the potentially translated summary directly
         # Keep fixed strings in English
-        index_content += f"**Source Repository:** [{repo_url}]({repo_url})\n\n"
+        if repo_url:
+            index_content += f"**Source Repository:** [{repo_url}]({repo_url})\n\n"
 
         # Add Mermaid diagram for relationships (diagram itself uses potentially translated names/labels)
         index_content += "```mermaid\n"
@@ -825,18 +1129,35 @@ class CombineTutorial(Node):
                 safe_name = "".join(
                     c if c.isalnum() else "_" for c in abstraction_name
                 ).lower()
-                filename = f"{i+1:02d}_{safe_name}.md"
-                index_content += f"{i+1}. [{abstraction_name}]({filename})\n"  # Use potentially translated name in link text
+                filename = f"{i + 1:02d}_{safe_name}.md"
+                index_content += f"{i + 1}. [{abstraction_name}]({filename})\n"  # Use potentially translated name in link text
+
+                # Prepare chapter content with Jekyll front matter
+                chapter_content = ""
+
+                # Add Jekyll front matter for chapter if enabled
+                if enable_jekyll:
+                    chapter_content += generate_jekyll_front_matter(
+                        title=abstraction_name, parent=project_name, nav_order=i + 1
+                    )
+
+                # Add the actual chapter content (potentially translated)
+                chapter_content += chapters_content[i]
 
                 # Add attribution to chapter content (using English fixed string)
-                chapter_content = chapters_content[i]  # Potentially translated content
                 if not chapter_content.endswith("\n\n"):
                     chapter_content += "\n\n"
                 # Keep fixed strings in English
                 chapter_content += f"---\n\nGenerated by [AI Codebase Knowledge Builder](https://github.com/The-Pocket/Tutorial-Codebase-Knowledge)"
 
                 # Store filename and corresponding content
-                chapter_files.append({"filename": filename, "content": chapter_content})
+                chapter_files.append(
+                    {
+                        "filename": filename,
+                        "content": chapter_content,
+                        "title": abstraction_name,
+                    }
+                )
             else:
                 print(
                     f"Warning: Mismatch between chapter order, abstractions, or content at index {i} (abstraction index {abstraction_index}). Skipping file generation for this entry."
@@ -848,15 +1169,20 @@ class CombineTutorial(Node):
         return {
             "output_path": output_path,
             "index_content": index_content,
-            "chapter_files": chapter_files,  # List of {"filename": str, "content": str}
+            "chapter_files": chapter_files,  # List of {"filename": str, "content": str, "title": str}
+            "enable_jekyll": enable_jekyll,
         }
 
     def exec(self, prep_res):
         output_path = prep_res["output_path"]
         index_content = prep_res["index_content"]
         chapter_files = prep_res["chapter_files"]
+        enable_jekyll = prep_res["enable_jekyll"]
 
         print(f"Combining tutorial into directory: {output_path}")
+        if enable_jekyll:
+            print(f"  ✓ Jekyll front matter enabled for navigation")
+
         # Rely on Node's built-in retry/fallback
         os.makedirs(output_path, exist_ok=True)
 
