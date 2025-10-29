@@ -371,9 +371,7 @@ Format the output as a YAML list of dictionaries:
                 }
             )
 
-        print(
-            f"✓ Identified {len(validated_abstractions)} abstractions ({doc_mode} mode)"
-        )
+        print(f"✓ Identified {len(validated_abstractions)} abstractions ({doc_mode} mode)")
         return validated_abstractions
 
     def post(self, shared, prep_res, exec_res):
@@ -445,9 +443,7 @@ class AnalyzeAndOrderChapters(Node):
             use_cache,
             doc_mode,
         ) = prep_res
-        print(
-            f"Analyzing relationships and ordering chapters using LLM (mode: {doc_mode})..."
-        )
+        print(f"Analyzing relationships and ordering chapters using LLM (mode: {doc_mode})...")
 
         language_instruction = ""
         lang_hint = ""
@@ -721,9 +717,7 @@ class WriteChapters(BatchNode):
                     f"Warning: Invalid abstraction index {abstraction_index} in chapter_order"
                 )
 
-        print(
-            f"Preparing to write {len(items_to_process)} chapters ({doc_mode} mode)..."
-        )
+        print(f"Preparing to write {len(items_to_process)} chapters ({doc_mode} mode)...")
         return items_to_process
 
     def exec(self, item):
@@ -734,10 +728,8 @@ class WriteChapters(BatchNode):
         language = item.get("language", "english")
         use_cache = item.get("use_cache", True)
         doc_mode = item.get("doc_mode", "developer")
-
-        print(
-            f"Writing chapter {chapter_num} ({doc_mode} mode): {abstraction_name[:50]}..."
-        )
+        
+        print(f"Writing chapter {chapter_num} ({doc_mode} mode): {abstraction_name[:50]}...")
 
         token_budget = TOKEN_BUDGETS["write_chapter"]
         file_context_str = get_optimized_content_for_indices(
@@ -782,7 +774,7 @@ Style Guidelines:
 - Include code snippets with syntax highlighting
 - Show actual file paths and line numbers when referencing code
 - Explain WHY certain technical decisions were made
-- Use mermaid diagrams for complex architectural flows
+- Use mermaid diagrams for complex architectural flows (see examples below)
 - Link to related technical chapters
 - Keep code examples focused and well-commented
 
@@ -806,7 +798,9 @@ def generate_token(user_id: str, expires_in: int = 3600) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 ```
 
-Mermaid diagram example for technical flow:
+Mermaid Diagram Examples (Mermaid 11.6.0 Compatible):
+
+**1. Sequence Diagram** - For API calls, service interactions, authentication flows:
 ```mermaid
 sequenceDiagram
     participant Client
@@ -815,12 +809,234 @@ sequenceDiagram
     participant JWTHandler
     
     Client->>AuthService: POST /login
+    activate AuthService
     AuthService->>Database: Verify credentials
+    activate Database
     Database-->>AuthService: User data
+    deactivate Database
     AuthService->>JWTHandler: Generate token
+    activate JWTHandler
     JWTHandler-->>AuthService: JWT token
+    deactivate JWTHandler
     AuthService-->>Client: 200 OK + token
+    deactivate AuthService
 ```
+
+**2. Flowchart** - For algorithms, decision logic, processing flows:
+```mermaid
+flowchart TD
+    Start([Request Received]) --> ValidateInput{Valid Input?}
+    ValidateInput -->|No| ReturnError[Return 400 Error]
+    ValidateInput -->|Yes| CheckAuth{Authenticated?}
+    CheckAuth -->|No| ReturnUnauth[Return 401 Unauthorized]
+    CheckAuth -->|Yes| ProcessData[Process Request]
+    ProcessData --> CheckDB{Data Exists?}
+    CheckDB -->|No| CreateNew[Create New Record]
+    CheckDB -->|Yes| UpdateExisting[Update Existing]
+    CreateNew --> SaveDB[(Save to Database)]
+    UpdateExisting --> SaveDB
+    SaveDB --> ReturnSuccess[Return 200 Success]
+    ReturnError --> End([End])
+    ReturnUnauth --> End
+    ReturnSuccess --> End
+```
+
+**3. Class Diagram** - For object-oriented architecture, inheritance, relationships:
+```mermaid
+classDiagram
+    class BaseModel {
+        +UUID id
+        +DateTime created_at
+        +DateTime updated_at
+        +save() void
+        +delete() void
+        +to_dict() dict
+    }
+    
+    class User {
+        +String email
+        +String password_hash
+        +String role
+        +authenticate(password) bool
+        +generate_token() string
+    }
+    
+    class Order {
+        +UUID user_id
+        +Decimal total_amount
+        +String status
+        +List~OrderItem~ items
+        +calculate_total() Decimal
+        +process_payment() bool
+    }
+    
+    class OrderItem {
+        +UUID product_id
+        +Integer quantity
+        +Decimal price
+        +get_subtotal() Decimal
+    }
+    
+    BaseModel <|-- User
+    BaseModel <|-- Order
+    BaseModel <|-- OrderItem
+    User "1" --> "0..*" Order : places
+    Order "1" --> "1..*" OrderItem : contains
+```
+
+**4. State Diagram** - For state machines, workflow states, lifecycle management:
+```mermaid
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> PendingReview : submit()
+    PendingReview --> Approved : approve()
+    PendingReview --> Rejected : reject()
+    PendingReview --> Draft : request_changes()
+    Rejected --> Draft : revise()
+    Approved --> Published : publish()
+    Published --> Archived : archive()
+    Archived --> [*]
+    
+    Draft : Entry: initialize_data()
+    Draft : Do: allow_edits()
+    PendingReview : Entry: notify_reviewers()
+    Approved : Entry: log_approval()
+    Published : Entry: make_public()
+```
+
+**5. Entity Relationship Diagram** - For database schema, data models:
+```mermaid
+erDiagram
+    USER ||--o{ ORDER : places
+    USER {
+        uuid id PK
+        string email UK
+        string password_hash
+        string role
+        datetime created_at
+    }
+    
+    ORDER ||--|{ ORDER_ITEM : contains
+    ORDER {
+        uuid id PK
+        uuid user_id FK
+        decimal total_amount
+        string status
+        datetime created_at
+    }
+    
+    ORDER_ITEM }o--|| PRODUCT : references
+    ORDER_ITEM {
+        uuid id PK
+        uuid order_id FK
+        uuid product_id FK
+        integer quantity
+        decimal price
+    }
+    
+    PRODUCT {
+        uuid id PK
+        string name
+        string description
+        decimal price
+        integer stock
+    }
+```
+
+**6. Architecture Diagram (C4 Style)** - For system architecture, component relationships:
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        WebApp[Web Application]
+        MobileApp[Mobile App]
+    end
+    
+    subgraph "API Gateway"
+        Gateway[API Gateway<br/>Rate Limiting, Auth]
+    end
+    
+    subgraph "Service Layer"
+        AuthSvc[Auth Service<br/>JWT, OAuth]
+        OrderSvc[Order Service<br/>Business Logic]
+        PaymentSvc[Payment Service<br/>Stripe Integration]
+    end
+    
+    subgraph "Data Layer"
+        PostgreSQL[(PostgreSQL<br/>User & Order Data)]
+        Redis[(Redis<br/>Cache & Sessions)]
+        S3[(S3<br/>File Storage)]
+    end
+    
+    WebApp --> Gateway
+    MobileApp --> Gateway
+    Gateway --> AuthSvc
+    Gateway --> OrderSvc
+    OrderSvc --> PaymentSvc
+    AuthSvc --> PostgreSQL
+    AuthSvc --> Redis
+    OrderSvc --> PostgreSQL
+    OrderSvc --> Redis
+    PaymentSvc --> S3
+    
+    style AuthSvc fill:#e1f5ff
+    style OrderSvc fill:#e1f5ff
+    style PaymentSvc fill:#e1f5ff
+    style PostgreSQL fill:#ffe1e1
+    style Redis fill:#ffe1e1
+```
+
+**7. Timeline Diagram** - For deployment pipelines, version history, event sequences:
+```mermaid
+timeline
+    title Development Pipeline
+    section Development
+        Feature Branch : Code Changes
+                      : Unit Tests
+                      : Code Review
+    section Testing
+        Merge to Main : Integration Tests
+                     : Security Scan
+                     : Performance Tests
+    section Staging
+        Deploy Staging : End-to-End Tests
+                      : UAT Testing
+    section Production
+        Deploy Prod : Health Check
+                   : Monitor Metrics
+                   : Rollback Ready
+```
+
+**8. Git Graph** - For branching strategy, release management:
+```mermaid
+gitgraph
+    commit id: "Initial commit"
+    branch develop
+    checkout develop
+    commit id: "Add auth module"
+    branch feature/payment
+    checkout feature/payment
+    commit id: "Implement payment API"
+    commit id: "Add payment tests"
+    checkout develop
+    merge feature/payment
+    commit id: "Update docs"
+    checkout main
+    merge develop tag: "v1.0.0"
+    checkout develop
+    commit id: "Start v1.1 features"
+```
+
+**Diagram Selection Guidelines:**
+- **Sequence Diagrams**: API flows, authentication, multi-service interactions
+- **Flowcharts**: Algorithms, decision trees, processing logic
+- **Class Diagrams**: OOP architecture, design patterns, inheritance
+- **State Diagrams**: Lifecycle management, workflow states, state machines
+- **ER Diagrams**: Database schema, data relationships
+- **Architecture Diagrams**: System overview, component interactions
+- **Timeline**: CI/CD pipelines, deployment processes
+- **Git Graph**: Release strategy, branching workflows
+
+Choose the diagram type that best illustrates the technical concept being explained.
 """
         else:  # user mode
             mode_specific_instructions = """
@@ -898,7 +1114,7 @@ Context from previous chapters:
 {previous_chapters_summary if previous_chapters_summary else "This is the first chapter."}
 
 {"Relevant Code Snippets:" if doc_mode == "developer" else "Relevant Technical Context (translate to user perspective):"}
-{file_context_str if file_context_str else f"No specific {'code' if doc_mode == 'developer' else 'technical'} snippets provided for this abstraction."}
+{file_context_str if file_context_str else f"No specific {"code" if doc_mode == "developer" else "technical"} snippets provided for this abstraction."}
 
 {mode_specific_instructions}
 
@@ -941,7 +1157,7 @@ class CombineTutorial(Node):
         project_name = shared["project_name"]
         output_base_dir = shared.get("output_dir", "output")
         doc_mode = shared.get("doc_mode", "developer")
-
+        
         # Add doc_mode suffix to output directory
         output_path = os.path.join(output_base_dir, f"{project_name}_{doc_mode}")
         repo_url = shared.get("repo_url")
@@ -977,14 +1193,12 @@ class CombineTutorial(Node):
         index_content = ""
         if enable_jekyll:
             index_content += generate_jekyll_front_matter(
-                title=f"{project_name} ({doc_mode.capitalize()} Guide)",
-                nav_order=jekyll_nav_order,
-                has_children=True,
+                title=f"{project_name} ({doc_mode.capitalize()} Guide)", 
+                nav_order=jekyll_nav_order, 
+                has_children=True
             )
 
-        doc_type_label = (
-            "Developer Documentation" if doc_mode == "developer" else "User Guide"
-        )
+        doc_type_label = "Developer Documentation" if doc_mode == "developer" else "User Guide"
         index_content += f"# {doc_type_label}: {project_name}\n\n"
 
         if enable_jekyll:
@@ -1017,9 +1231,9 @@ class CombineTutorial(Node):
                 chapter_content = ""
                 if enable_jekyll:
                     chapter_content += generate_jekyll_front_matter(
-                        title=abstraction_name,
-                        parent=f"{project_name} ({doc_mode.capitalize()} Guide)",
-                        nav_order=i + 1,
+                        title=abstraction_name, 
+                        parent=f"{project_name} ({doc_mode.capitalize()} Guide)", 
+                        nav_order=i + 1
                     )
 
                 chapter_content += chapters_content[i]
@@ -1079,6 +1293,4 @@ class CombineTutorial(Node):
     def post(self, shared, prep_res, exec_res):
         shared["final_output_dir"] = exec_res
         doc_mode = shared.get("doc_mode", "developer")
-        print(
-            f"\n✓ {doc_mode.capitalize()} documentation generation complete! Files in: {exec_res}"
-        )
+        print(f"\n✓ {doc_mode.capitalize()} documentation generation complete! Files in: {exec_res}")
