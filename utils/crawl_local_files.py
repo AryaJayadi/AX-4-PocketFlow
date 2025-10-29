@@ -1,23 +1,28 @@
 import os
 import fnmatch
 import pathspec
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Set, Optional
 
 
 def crawl_local_files(
-    directory,
-    include_patterns=None,
-    exclude_patterns=None,
-    max_file_size=None,
-    use_relative_paths=True,
-):
+    directory: str,
+    include_patterns: Optional[Set[str]] = None,
+    exclude_patterns: Optional[Set[str]] = None,
+    max_file_size: Optional[int] = None,
+    use_relative_paths: bool = True,
+    max_workers: int = 8,  # OPTIMIZED: Parallel I/O
+) -> Dict[str, Dict[str, str]]:
     """
-    Crawl files in a local directory with similar interface as crawl_github_files.
+    OPTIMIZED: Crawl files in parallel with progress tracking.
+
     Args:
-        directory (str): Path to local directory
-        include_patterns (set): File patterns to include (e.g. {"*.py", "*.js"})
-        exclude_patterns (set): File patterns to exclude (e.g. {"tests/*"})
-        max_file_size (int): Maximum file size in bytes
-        use_relative_paths (bool): Whether to use paths relative to directory
+        directory: Path to local directory
+        include_patterns: File patterns to include (e.g. {"*.py", "*.js"})
+        exclude_patterns: File patterns to exclude (e.g. {"tests/*"})
+        max_file_size: Maximum file size in bytes
+        use_relative_paths: Whether to use paths relative to directory
+        max_workers: Number of parallel file readers (default: 8)
 
     Returns:
         dict: {"files": {filepath: content}}
@@ -25,23 +30,24 @@ def crawl_local_files(
     if not os.path.isdir(directory):
         raise ValueError(f"Directory does not exist: {directory}")
 
-    files_dict = {}
-
-    # --- Load .gitignore ---
+    # Load .gitignore
     gitignore_path = os.path.join(directory, ".gitignore")
     gitignore_spec = None
     if os.path.exists(gitignore_path):
         try:
             with open(gitignore_path, "r", encoding="utf-8-sig") as f:
                 gitignore_patterns = f.readlines()
-            gitignore_spec = pathspec.PathSpec.from_lines("gitwildmatch", gitignore_patterns)
-            print(f"Loaded .gitignore patterns from {gitignore_path}")
+            gitignore_spec = pathspec.PathSpec.from_lines(
+                "gitwildmatch", gitignore_patterns
+            )
+            print(f"✓ Loaded .gitignore from {gitignore_path}")
         except Exception as e:
-            print(f"Warning: Could not read or parse .gitignore file {gitignore_path}: {e}")
+            print(f"⚠ Warning: Could not read .gitignore: {e}")
 
-    all_files = []
+    # OPTIMIZED: Collect all candidate files first
+    candidate_files = []
     for root, dirs, files in os.walk(directory):
-        # Filter directories using .gitignore and exclude_patterns early
+        # Filter directories early
         excluded_dirs = set()
         for d in dirs:
             dirpath_rel = os.path.relpath(os.path.join(root, d), directory)
@@ -52,35 +58,43 @@ def crawl_local_files(
 
             if exclude_patterns:
                 for pattern in exclude_patterns:
-                    if fnmatch.fnmatch(dirpath_rel, pattern) or fnmatch.fnmatch(d, pattern):
+                    if fnmatch.fnmatch(dirpath_rel, pattern) or fnmatch.fnmatch(
+                        d, pattern
+                    ):
                         excluded_dirs.add(d)
                         break
 
-        for d in dirs.copy():
-            if d in excluded_dirs:
-                dirs.remove(d)
+        for d in excluded_dirs:
+            dirs.remove(d)
 
         for filename in files:
             filepath = os.path.join(root, filename)
-            all_files.append(filepath)
+            candidate_files.append(filepath)
 
-    total_files = len(all_files)
-    processed_files = 0
+    total_files = len(candidate_files)
+    print(f"Found {total_files} candidate files")
 
-    for filepath in all_files:
-        relpath = os.path.relpath(filepath, directory) if use_relative_paths else filepath
+    # OPTIMIZED: Filter and read files in parallel
+    files_dict = {}
+    processed_count = 0
+    included_count = 0
 
-        # --- Exclusion check ---
-        excluded = False
+    def process_file(filepath: str) -> tuple:
+        """Process a single file and return (relpath, content, status)."""
+        relpath = (
+            os.path.relpath(filepath, directory) if use_relative_paths else filepath
+        )
+
+        # Check exclusions
         if gitignore_spec and gitignore_spec.match_file(relpath):
-            excluded = True
+            return (relpath, None, "gitignore")
 
-        if not excluded and exclude_patterns:
+        if exclude_patterns:
             for pattern in exclude_patterns:
                 if fnmatch.fnmatch(relpath, pattern):
-                    excluded = True
-                    break
+                    return (relpath, None, "excluded")
 
+        # Check inclusions
         included = False
         if include_patterns:
             for pattern in include_patterns:
@@ -90,47 +104,56 @@ def crawl_local_files(
         else:
             included = True
 
-        processed_files += 1 # Increment processed count regardless of inclusion/exclusion
+        if not included:
+            return (relpath, None, "not_included")
 
-        status = "processed"
-        if not included or excluded:
-            status = "skipped (excluded)"
-            # Print progress for skipped files due to exclusion
-            if total_files > 0:
-                percentage = (processed_files / total_files) * 100
-                rounded_percentage = int(percentage)
-                print(f"\033[92mProgress: {processed_files}/{total_files} ({rounded_percentage}%) {relpath} [{status}]\033[0m")
-            continue # Skip to next file if not included or excluded
+        # Check size
+        if max_file_size:
+            try:
+                size = os.path.getsize(filepath)
+                if size > max_file_size:
+                    return (relpath, None, "size_limit")
+            except Exception:
+                return (relpath, None, "size_error")
 
-        if max_file_size and os.path.getsize(filepath) > max_file_size:
-            status = "skipped (size limit)"
-            # Print progress for skipped files due to size limit
-            if total_files > 0:
-                percentage = (processed_files / total_files) * 100
-                rounded_percentage = int(percentage)
-                print(f"\033[92mProgress: {processed_files}/{total_files} ({rounded_percentage}%) {relpath} [{status}]\033[0m")
-            continue # Skip large files
-
-        # --- File is being processed ---        
+        # Read file
         try:
             with open(filepath, "r", encoding="utf-8-sig") as f:
                 content = f.read()
-            files_dict[relpath] = content
+            return (relpath, content, "success")
         except Exception as e:
-            print(f"Warning: Could not read file {filepath}: {e}")
-            status = "skipped (read error)"
+            return (relpath, None, f"read_error: {e}")
 
-        # --- Print progress for processed or error files ---
-        if total_files > 0:
-            percentage = (processed_files / total_files) * 100
-            rounded_percentage = int(percentage)
-            print(f"\033[92mProgress: {processed_files}/{total_files} ({rounded_percentage}%) {relpath} [{status}]\033[0m")
+    # OPTIMIZED: Process files in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_file = {
+            executor.submit(process_file, fp): fp for fp in candidate_files
+        }
 
+        for future in as_completed(future_to_file):
+            relpath, content, status = future.result()
+            processed_count += 1
+
+            if content is not None:
+                files_dict[relpath] = content
+                included_count += 1
+
+            # OPTIMIZED: Less verbose progress (every 10% or every 100 files)
+            if (
+                processed_count % max(1, total_files // 10) == 0
+                or processed_count % 100 == 0
+            ):
+                percentage = int((processed_count / total_files) * 100)
+                print(
+                    f"Progress: {processed_count}/{total_files} ({percentage}%) - {included_count} included"
+                )
+
+    print(f"✓ Crawled {included_count}/{total_files} files")
     return {"files": files_dict}
 
 
 if __name__ == "__main__":
-    print("--- Crawling parent directory ('..') ---")
+    print("--- Testing optimized local crawler ---")
     files_data = crawl_local_files(
         "..",
         exclude_patterns={
@@ -142,6 +165,4 @@ if __name__ == "__main__":
             "output/*",
         },
     )
-    print(f"Found {len(files_data['files'])} files:")
-    for path in files_data["files"]:
-        print(f"  {path}")
+    print(f"\nFound {len(files_data['files'])} files")
