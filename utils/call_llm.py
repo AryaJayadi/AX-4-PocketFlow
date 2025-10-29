@@ -932,6 +932,18 @@ def _call_llm_provider(prompt: str) -> str:
     if not model.startswith("gpt-5"):
         payload["temperature"] = 0.7  # safe for most non-5 models; remove if you prefer
 
+    # Qwen-specific handling: Qwen3 models support enable_thinking parameter
+    # For commercial models like qwen3-max, enable_thinking defaults to False
+    # For open source models, it defaults to True, which may cause errors without streaming
+    if provider == "QWEN" and model.startswith("qwen"):
+        # Check if user wants to explicitly set enable_thinking via environment
+        enable_thinking = os.getenv("QWEN_ENABLE_THINKING", "").lower()
+        if enable_thinking == "false":
+            payload["enable_thinking"] = False
+        elif enable_thinking == "true":
+            payload["enable_thinking"] = True
+        # If not set, let the API use its default (False for commercial, True for open source)
+
     try:
         # ---- Solution #2: Backoff-aware POST ----
         response = _post_with_backoff(
