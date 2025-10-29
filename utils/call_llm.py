@@ -856,15 +856,82 @@ def _call_anthropic(prompt: str, model: str, api_key: str) -> str:
         raise Exception(f"Failed to parse response from Anthropic. Error: {e}")
 
 
+def _call_qwen(prompt: str, model: str, api_key: str, base_url: str) -> str:
+    """
+    Call Alibaba Cloud's Qwen API using OpenAI SDK.
+    The API is OpenAI-compatible, so we can use the OpenAI client.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise Exception(
+            "OpenAI SDK is required for Qwen. Install it with: pip install openai"
+        )
+
+    # Initialize OpenAI client with Qwen's base URL
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+    # Build messages for TPM admission
+    messages = [{"role": "user", "content": prompt}]
+
+    # Get max tokens from environment or use default
+    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "16384"))
+
+    # ---- Solution #1: Token gate before sending ----
+    _admit_or_wait(
+        messages,
+        model=model,
+        expected_output=max_tokens,
+        logger=logger,
+    )
+
+    # Prepare completion parameters
+    completion_params = {
+        "model": model,
+        "messages": messages,
+    }
+
+    # Handle enable_thinking parameter for Qwen3 models
+    # For commercial models like qwen3-max, enable_thinking defaults to False
+    # For open source models, it defaults to True, which may cause errors without streaming
+    enable_thinking = os.getenv("QWEN_ENABLE_THINKING", "").lower()
+    if enable_thinking == "false":
+        completion_params["extra_body"] = {"enable_thinking": False}
+    elif enable_thinking == "true":
+        completion_params["extra_body"] = {"enable_thinking": True}
+
+    try:
+        logger.info(f"Calling Qwen API with model: {model}")
+
+        completion = client.chat.completions.create(**completion_params)
+
+        response_text = completion.choices[0].message.content
+
+        # Log the response
+        logger.info(f"Qwen API response received: {len(response_text)} characters")
+
+        return response_text
+
+    except Exception as e:
+        error_message = f"Qwen API error: {e}"
+        logger.error(error_message)
+        raise Exception(error_message)
+
+
 def _call_llm_provider(prompt: str) -> str:
     """
     Call an LLM provider based on environment variables.
     Environment variables:
-    - LLM_PROVIDER: "ANTHROPIC", "OPEN_AI", "OLLAMA", "XAI", etc.
-    - <provider>_MODEL: Model name (e.g., ANTHROPIC_MODEL, OPEN_AI_MODEL)
-    - <provider>_BASE_URL: Base URL without endpoint (not needed for ANTHROPIC)
+    - LLM_PROVIDER: "ANTHROPIC", "QWEN", "OPEN_AI", "OLLAMA", "XAI", etc.
+    - <provider>_MODEL: Model name (e.g., ANTHROPIC_MODEL, QWEN_MODEL, OPEN_AI_MODEL)
+    - <provider>_BASE_URL: Base URL (required for QWEN, OPEN_AI, etc., not needed for ANTHROPIC)
     - <provider>_API_KEY: API key
-    The endpoint /v1/chat/completions will be appended to the base URL (except for Anthropic).
+
+    Note: ANTHROPIC and QWEN have special handling and use their own dedicated functions.
+    Other providers use OpenAI-compatible API with /chat/completions endpoint.
     """
     logger.info(f"PROMPT: {prompt}")  # log the prompt
 
@@ -891,6 +958,21 @@ def _call_llm_provider(prompt: str) -> str:
 
         return _call_anthropic(prompt, model, api_key)
 
+    # Special handling for Qwen
+    if provider == "QWEN":
+        model = os.environ.get("QWEN_MODEL")
+        api_key = os.environ.get("QWEN_API_KEY")
+        base_url = os.environ.get("QWEN_BASE_URL")
+
+        if not model:
+            raise ValueError("QWEN_MODEL environment variable is required")
+        if not api_key:
+            raise ValueError("QWEN_API_KEY environment variable is required")
+        if not base_url:
+            raise ValueError("QWEN_BASE_URL environment variable is required")
+
+        return _call_qwen(prompt, model, api_key, base_url)
+
     # OpenAI-compatible providers (OPEN_AI, OLLAMA, XAI, etc.)
     model_var = f"{provider}_MODEL"
     base_url_var = f"{provider}_BASE_URL"
@@ -905,7 +987,7 @@ def _call_llm_provider(prompt: str) -> str:
     if not base_url:
         raise ValueError(f"{base_url_var} environment variable is required")
 
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    url = f"{base_url.rstrip('/')}/chat/completions"
 
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -931,18 +1013,6 @@ def _call_llm_provider(prompt: str) -> str:
     }
     if not model.startswith("gpt-5"):
         payload["temperature"] = 0.7  # safe for most non-5 models; remove if you prefer
-
-    # Qwen-specific handling: Qwen3 models support enable_thinking parameter
-    # For commercial models like qwen3-max, enable_thinking defaults to False
-    # For open source models, it defaults to True, which may cause errors without streaming
-    if provider == "QWEN" and model.startswith("qwen"):
-        # Check if user wants to explicitly set enable_thinking via environment
-        enable_thinking = os.getenv("QWEN_ENABLE_THINKING", "").lower()
-        if enable_thinking == "false":
-            payload["enable_thinking"] = False
-        elif enable_thinking == "true":
-            payload["enable_thinking"] = True
-        # If not set, let the API use its default (False for commercial, True for open source)
 
     try:
         # ---- Solution #2: Backoff-aware POST ----
