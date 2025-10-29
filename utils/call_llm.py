@@ -162,7 +162,7 @@ def _post_with_backoff(url, headers, json_payload, max_retries=6, logger=None):
     return resp
 
 
-# ========= Context Optimization (see original file for full implementations) =========
+# ========= Context Optimization =========
 def estimate_tokens(text: str, model: str = "gpt-5-mini") -> int:
     """Accurately estimate tokens for a given text."""
     try:
@@ -180,8 +180,504 @@ def estimate_tokens(text: str, model: str = "gpt-5-mini") -> int:
         return max(1, len(text) // 4)
 
 
-# Note: For brevity, I'm including key optimization functions.
-# For full code structure extraction functions, see original file.
+def extract_code_structure(code: str, file_path: str) -> str:
+    """
+    Extract the structural outline of code (function/class signatures, docstrings)
+    without full implementations. Reduces token usage by 60-80% while preserving context.
+
+    Args:
+        code: Source code content
+        file_path: File path for language detection
+
+    Returns:
+        Structured outline of the code as a string
+    """
+    ext = file_path.split(".")[-1].lower()
+
+    if ext in ["py", "pyx", "pyi"]:
+        return _extract_python_structure(code)
+    elif ext in ["js", "jsx", "ts", "tsx"]:
+        return _extract_javascript_structure(code)
+    elif ext in ["java"]:
+        return _extract_java_structure(code)
+    elif ext in ["go"]:
+        return _extract_go_structure(code)
+    elif ext in ["c", "cc", "cpp", "h", "hpp"]:
+        return _extract_c_structure(code)
+    else:
+        # For unknown types, return first 50 lines
+        lines = code.split("\n")
+        if len(lines) > 50:
+            return "\n".join(lines[:50]) + f"\n... ({len(lines) - 50} more lines)"
+        return code
+
+
+def _extract_python_structure(code: str) -> str:
+    """Extract Python structure: imports, class/function signatures, docstrings."""
+    try:
+        tree = ast.parse(code)
+        lines = code.split("\n")
+        structure = []
+
+        # Extract imports
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                if hasattr(node, "lineno"):
+                    structure.append(lines[node.lineno - 1])
+
+        if structure:
+            structure.append("")  # Blank line after imports
+
+        # Extract class and function definitions
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                # Class definition with docstring
+                class_def = f"class {node.name}"
+                if node.bases:
+                    bases = ", ".join([ast.unparse(base) for base in node.bases])
+                    class_def += f"({bases})"
+                class_def += ":"
+                structure.append(class_def)
+
+                # Add docstring if exists
+                docstring = ast.get_docstring(node)
+                if docstring:
+                    structure.append(f'    """{docstring}"""')
+
+                # Add method signatures
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        args = [arg.arg for arg in item.args.args]
+                        method_sig = f"    def {item.name}({', '.join(args)})"
+                        # Add return annotation if exists
+                        if item.returns:
+                            method_sig += f" -> {ast.unparse(item.returns)}"
+                        method_sig += ": ..."
+                        structure.append(method_sig)
+
+                        # Add method docstring
+                        method_doc = ast.get_docstring(item)
+                        if method_doc:
+                            first_line = method_doc.split("\n")[0]
+                            structure.append(f'        """{first_line}"""')
+
+                structure.append("")
+
+            elif isinstance(node, ast.FunctionDef) and node.col_offset == 0:
+                # Top-level function
+                args = [arg.arg for arg in node.args.args]
+                func_sig = f"def {node.name}({', '.join(args)})"
+                if node.returns:
+                    func_sig += f" -> {ast.unparse(node.returns)}"
+                func_sig += ":"
+                structure.append(func_sig)
+
+                # Add docstring
+                docstring = ast.get_docstring(node)
+                if docstring:
+                    first_line = docstring.split("\n")[0]
+                    structure.append(f'    """{first_line}"""')
+                structure.append("    ...")
+                structure.append("")
+
+        result = "\n".join(structure)
+        if not result.strip():
+            return "\n".join(code.split("\n")[:30])
+        return result
+
+    except Exception:
+        return "\n".join(code.split("\n")[:30])
+
+
+def _extract_javascript_structure(code: str) -> str:
+    """Extract JavaScript/TypeScript structure using regex patterns."""
+    structure = []
+    lines = code.split("\n")
+
+    # Extract imports
+    for line in lines:
+        if re.match(r"^\s*(import|export|require)", line.strip()):
+            structure.append(line.rstrip())
+
+    if structure:
+        structure.append("")
+
+    # Extract class definitions
+    class_pattern = re.compile(
+        r"^\s*(export\s+)?(class|interface|type)\s+(\w+)", re.MULTILINE
+    )
+    for match in class_pattern.finditer(code):
+        structure.append(match.group(0))
+
+    # Extract function definitions
+    func_patterns = [
+        r"^\s*(export\s+)?(async\s+)?function\s+(\w+)\s*\([^)]*\)",
+        r"^\s*(const|let|var)\s+(\w+)\s*=\s*(async\s*)?\([^)]*\)\s*=>",
+        r"^\s*(\w+)\s*\([^)]*\)\s*\{",
+    ]
+
+    for pattern in func_patterns:
+        for match in re.finditer(pattern, code, re.MULTILINE):
+            line = match.group(0).rstrip()
+            if not line.strip().startswith("//"):
+                structure.append(line)
+
+    result = "\n".join(structure[:50])
+    return result if result.strip() else "\n".join(lines[:30])
+
+
+def _extract_java_structure(code: str) -> str:
+    """Extract Java structure."""
+    structure = []
+    lines = code.split("\n")
+
+    # Extract package and imports
+    for line in lines:
+        if re.match(r"^\s*(package|import)\s+", line.strip()):
+            structure.append(line.rstrip())
+
+    if structure:
+        structure.append("")
+
+    # Extract class/interface/enum definitions and method signatures
+    patterns = [
+        r"^\s*(public|private|protected)?\s*(class|interface|enum)\s+\w+",
+        r"^\s*(public|private|protected)?\s*(static\s+)?\w+\s+\w+\s*\([^)]*\)",
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, code, re.MULTILINE):
+            structure.append(match.group(0).rstrip() + " { ... }")
+
+    result = "\n".join(structure[:50])
+    return result if result.strip() else "\n".join(lines[:30])
+
+
+def _extract_go_structure(code: str) -> str:
+    """Extract Go structure."""
+    structure = []
+    lines = code.split("\n")
+
+    # Extract package and imports
+    for line in lines:
+        if re.match(r"^\s*(package|import)\s+", line.strip()):
+            structure.append(line.rstrip())
+
+    if structure:
+        structure.append("")
+
+    # Extract type definitions and function signatures
+    patterns = [
+        r"^\s*type\s+\w+\s+(struct|interface)",
+        r"^\s*func\s+(\(\w+\s+\*?\w+\)\s+)?\w+\s*\([^)]*\)",
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, code, re.MULTILINE):
+            structure.append(match.group(0).rstrip() + " { ... }")
+
+    result = "\n".join(structure[:50])
+    return result if result.strip() else "\n".join(lines[:30])
+
+
+def _extract_c_structure(code: str) -> str:
+    """Extract C/C++ structure."""
+    structure = []
+    lines = code.split("\n")
+
+    # Extract includes and defines
+    for line in lines:
+        if re.match(r"^\s*#\s*(include|define)", line.strip()):
+            structure.append(line.rstrip())
+
+    if structure:
+        structure.append("")
+
+    # Extract function signatures, structs, classes
+    patterns = [
+        r"^\s*(struct|class|enum)\s+\w+",
+        r"^\s*\w+[\s\*]+\w+\s*\([^)]*\)\s*[;{]",
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, code, re.MULTILINE):
+            line = match.group(0).rstrip()
+            if "{" in line:
+                line = line.replace("{", "{ ... }")
+            structure.append(line)
+
+    result = "\n".join(structure[:50])
+    return result if result.strip() else "\n".join(lines[:30])
+
+
+def chunk_large_file(
+    code: str, file_path: str, max_tokens: int = 2000
+) -> List[Dict[str, Any]]:
+    """
+    Split large files into semantic chunks based on code structure.
+
+    Args:
+        code: Source code content
+        file_path: File path for language detection
+        max_tokens: Maximum tokens per chunk
+
+    Returns:
+        List of chunks with metadata: [{"content": str, "type": str, "name": str, "tokens": int}]
+    """
+    ext = file_path.split(".")[-1].lower()
+
+    if ext in ["py", "pyx", "pyi"]:
+        return _chunk_python_file(code, max_tokens)
+    else:
+        return _chunk_by_lines(code, max_tokens)
+
+
+def _chunk_python_file(code: str, max_tokens: int) -> List[Dict[str, Any]]:
+    """Chunk Python file by classes and functions."""
+    chunks = []
+
+    try:
+        tree = ast.parse(code)
+        lines = code.split("\n")
+
+        # Get module-level imports
+        imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                if hasattr(node, "lineno"):
+                    imports.append(lines[node.lineno - 1])
+
+        imports_text = "\n".join(imports)
+
+        # Process each top-level node
+        for node in tree.body:
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+                start_line = node.lineno - 1
+                end_line = (
+                    node.end_lineno if hasattr(node, "end_lineno") else start_line + 50
+                )
+
+                node_code = "\n".join(lines[start_line:end_line])
+                node_tokens = estimate_tokens(node_code)
+
+                chunk_type = "class" if isinstance(node, ast.ClassDef) else "function"
+
+                # If too large, get structure instead
+                if node_tokens > max_tokens:
+                    if isinstance(node, ast.ClassDef):
+                        node_code = _extract_class_structure(node, lines)
+                    else:
+                        node_code = _extract_function_structure(node, lines)
+                    node_tokens = estimate_tokens(node_code)
+
+                chunks.append(
+                    {
+                        "content": f"{imports_text}\n\n{node_code}"
+                        if imports_text
+                        else node_code,
+                        "type": chunk_type,
+                        "name": node.name,
+                        "tokens": node_tokens,
+                        "priority": 1,
+                    }
+                )
+
+        return (
+            chunks
+            if chunks
+            else [
+                {
+                    "content": code[:5000],
+                    "type": "module",
+                    "name": "main",
+                    "tokens": estimate_tokens(code[:5000]),
+                    "priority": 1,
+                }
+            ]
+        )
+
+    except Exception:
+        return _chunk_by_lines(code, max_tokens)
+
+
+def _extract_class_structure(node: ast.ClassDef, lines: List[str]) -> str:
+    """Extract class structure with method signatures."""
+    start = node.lineno - 1
+    structure = [lines[start]]
+
+    docstring = ast.get_docstring(node)
+    if docstring:
+        structure.append(f'    """{docstring.split(chr(10))[0]}"""')
+
+    for item in node.body:
+        if isinstance(item, ast.FunctionDef):
+            args = [arg.arg for arg in item.args.args]
+            method_sig = f"    def {item.name}({', '.join(args)}): ..."
+            structure.append(method_sig)
+
+    return "\n".join(structure)
+
+
+def _extract_function_structure(node: ast.FunctionDef, lines: List[str]) -> str:
+    """Extract function signature with docstring."""
+    start = node.lineno - 1
+    structure = [lines[start]]
+
+    docstring = ast.get_docstring(node)
+    if docstring:
+        structure.append(f'    """{docstring.split(chr(10))[0]}"""')
+    structure.append("    ...")
+
+    return "\n".join(structure)
+
+
+def _chunk_by_lines(code: str, max_tokens: int) -> List[Dict[str, Any]]:
+    """Fallback: chunk by lines for non-Python files."""
+    lines = code.split("\n")
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+
+    for line in lines:
+        line_tokens = estimate_tokens(line)
+        if current_tokens + line_tokens > max_tokens and current_chunk:
+            chunks.append(
+                {
+                    "content": "\n".join(current_chunk),
+                    "type": "section",
+                    "name": f"lines_{len(chunks) + 1}",
+                    "tokens": current_tokens,
+                    "priority": 1,
+                }
+            )
+            current_chunk = [line]
+            current_tokens = line_tokens
+        else:
+            current_chunk.append(line)
+            current_tokens += line_tokens
+
+    if current_chunk:
+        chunks.append(
+            {
+                "content": "\n".join(current_chunk),
+                "type": "section",
+                "name": f"lines_{len(chunks) + 1}",
+                "tokens": current_tokens,
+                "priority": 1,
+            }
+        )
+
+    return chunks
+
+
+def optimize_context_for_budget(
+    files_content_map: Dict[str, str],
+    token_budget: int,
+    use_structure_for_large: bool = True,
+    priority_keywords: Optional[List[str]] = None,
+) -> str:
+    """
+    Optimize file context to fit within token budget while preserving important information.
+
+    Args:
+        files_content_map: Dictionary mapping file paths to content
+        token_budget: Maximum tokens allowed
+        use_structure_for_large: Extract structure for files exceeding 30% of budget
+        priority_keywords: Keywords to prioritize files (e.g., ["main", "core", "api"])
+
+    Returns:
+        Optimized context string fitting within budget
+    """
+    if not files_content_map:
+        return ""
+
+    # Calculate tokens for each file
+    file_tokens = []
+    for file_path, content in files_content_map.items():
+        tokens = estimate_tokens(content)
+        priority = 1
+
+        # Boost priority for files with keywords
+        if priority_keywords:
+            for keyword in priority_keywords:
+                if keyword.lower() in file_path.lower():
+                    priority = 0  # Higher priority (lower number)
+                    break
+
+        file_tokens.append(
+            {
+                "path": file_path,
+                "content": content,
+                "tokens": tokens,
+                "priority": priority,
+            }
+        )
+
+    # Sort by priority, then by token count (smaller first)
+    file_tokens.sort(key=lambda x: (x["priority"], x["tokens"]))
+
+    # Build optimized context
+    context_parts = []
+    used_tokens = 0
+    per_file_budget = token_budget * 0.3  # 30% of budget per file max
+
+    for file_info in file_tokens:
+        file_path = file_info["path"]
+        content = file_info["content"]
+        tokens = file_info["tokens"]
+
+        remaining_budget = token_budget - used_tokens
+        if remaining_budget < 100:  # Not enough space left
+            break
+
+        # Strategy 1: Fit full file
+        if used_tokens + tokens <= token_budget:
+            context_parts.append(f"--- File: {file_path} ---\n{content}")
+            used_tokens += tokens
+
+        # Strategy 2: Extract structure for large files
+        elif use_structure_for_large and tokens > per_file_budget:
+            structure = extract_code_structure(content, file_path)
+            structure_tokens = estimate_tokens(structure)
+
+            if used_tokens + structure_tokens <= token_budget:
+                context_parts.append(
+                    f"--- File: {file_path} (structure only) ---\n{structure}"
+                )
+                used_tokens += structure_tokens
+
+        # Strategy 3: Truncate to fit
+        else:
+            lines = content.split("\n")
+            if not lines:
+                continue
+
+            # Estimate lines that fit
+            avg_chars_per_line = len(content) / len(lines) if len(lines) > 0 else 80
+            approx_lines = int(remaining_budget * 4 / avg_chars_per_line)
+            approx_lines = max(10, min(approx_lines, len(lines)))
+
+            truncated = "\n".join(lines[:approx_lines])
+            truncated_tokens = estimate_tokens(truncated)
+
+            if truncated_tokens <= remaining_budget:
+                context_parts.append(
+                    f"--- File: {file_path} (truncated) ---\n{truncated}\n... (truncated)"
+                )
+                used_tokens += truncated_tokens
+
+    result = "\n\n".join(context_parts)
+
+    # Log optimization stats
+    try:
+        logger.info(
+            f"Context optimization: {len(files_content_map)} files -> "
+            f"{len(context_parts)} included, {used_tokens}/{token_budget} tokens used"
+        )
+    except NameError:
+        pass
+
+    return result
 
 
 def get_smart_context(
@@ -190,9 +686,32 @@ def get_smart_context(
     token_budget: int = 8000,
     priority_keywords: Optional[List[str]] = None,
 ) -> str:
-    """Get optimized context for specific file indices with smart chunking."""
-    # Implementation from original file
-    pass
+    """
+    Get optimized context for specific file indices with smart chunking.
+
+    Args:
+        files_data: List of (path, content) tuples
+        indices: File indices to include
+        token_budget: Maximum tokens for context
+        priority_keywords: Keywords for file prioritization
+
+    Returns:
+        Optimized context string
+    """
+    # Build content map for specified indices
+    files_content_map = {}
+    for i in indices:
+        if 0 <= i < len(files_data):
+            path, content = files_data[i]
+            files_content_map[path] = content
+
+    # Optimize and return
+    return optimize_context_for_budget(
+        files_content_map,
+        token_budget=token_budget,
+        use_structure_for_large=True,
+        priority_keywords=priority_keywords,
+    )
 
 
 # ========= Logging Setup =========
