@@ -1,33 +1,36 @@
 from pocketflow import Flow
-# Import all node classes from nodes.py
+
+# Import optimized node classes
 from nodes import (
     FetchRepo,
     IdentifyAbstractions,
-    AnalyzeRelationships,
-    OrderChapters,
+    AnalyzeAndOrderChapters,  # OPTIMIZED: Merged node
     WriteChapters,
-    CombineTutorial
+    CombineTutorial,
 )
 
-def create_tutorial_flow():
-    """Creates and returns the codebase tutorial generation flow."""
 
+def create_tutorial_flow():
+    """
+    Creates and returns the optimized codebase tutorial generation flow.
+
+    OPTIMIZATION: Reduced from 4 sequential LLM calls to 3 by merging
+    AnalyzeRelationships + OrderChapters into one call.
+    """
     # Instantiate nodes
     fetch_repo = FetchRepo()
     identify_abstractions = IdentifyAbstractions(max_retries=5, wait=20)
-    analyze_relationships = AnalyzeRelationships(max_retries=5, wait=20)
-    order_chapters = OrderChapters(max_retries=5, wait=20)
-    write_chapters = WriteChapters(max_retries=5, wait=20) # This is a BatchNode
+    analyze_and_order = AnalyzeAndOrderChapters(
+        max_retries=5, wait=20
+    )  # OPTIMIZED: Single merged node
+    write_chapters = WriteChapters(max_retries=5, wait=20)
     combine_tutorial = CombineTutorial()
 
-    # Connect nodes in sequence based on the design
+    # OPTIMIZED: Shorter pipeline (4 nodes instead of 5)
     fetch_repo >> identify_abstractions
-    identify_abstractions >> analyze_relationships
-    analyze_relationships >> order_chapters
-    order_chapters >> write_chapters
+    identify_abstractions >> analyze_and_order  # Single step instead of 2
+    analyze_and_order >> write_chapters
     write_chapters >> combine_tutorial
 
-    # Create the flow starting with FetchRepo
     tutorial_flow = Flow(start=fetch_repo)
-
     return tutorial_flow

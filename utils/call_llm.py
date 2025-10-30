@@ -1,3 +1,22 @@
+"""
+Optimized LLM calling module with separated provider implementations.
+
+Supported providers:
+- OpenAI (GPT-4, GPT-5, etc.)
+- Anthropic (Claude)
+- Qwen (Alibaba Cloud)
+- Gemini (Google)
+- Ollama (local models)
+- XAI (xAI models)
+- Generic OpenAI-compatible APIs
+
+Features:
+- Token-per-minute (TPM) rate limiting
+- Exponential backoff for 429 errors
+- Response caching
+- Code structure extraction for context optimization
+"""
+
 from google import genai
 import os
 import logging
@@ -14,21 +33,16 @@ from typing import List, Dict, Tuple, Optional, Any
 try:
     from dotenv import load_dotenv
 
-    load_dotenv()  # loads variables from a .env file into os.environ
+    load_dotenv()
 except Exception:
     pass
 
-# ========= Token-per-minute gate (Solution #1) =========
-# Env overrides:
-#   OPENAI_TPM_LIMIT         -> integer TPM limit for your org/key (default 500000)
-#   OPENAI_TPM_SOFT_PCT      -> soft cap fraction to leave headroom (default 0.9)
-#   LLM_EXPECTED_OUTPUT_TOKENS -> expected output tokens per call (default 512)
+# ========= Token-per-minute gate =========
 TPM_LIMIT = int(os.getenv("OPENAI_TPM_LIMIT", "500000"))
 TPM_SOFT_PCT = float(os.getenv("OPENAI_TPM_SOFT_PCT", "0.9"))
 TPM_SOFT_CAP = int(TPM_LIMIT * TPM_SOFT_PCT)
 EXPECTED_OUTPUT_TOKENS_DEFAULT = int(os.getenv("LLM_EXPECTED_OUTPUT_TOKENS", "512"))
 
-# rolling 60s window of (timestamp, tokens)
 _token_window = deque()
 _WINDOW_SECONDS = 60
 
@@ -36,16 +50,11 @@ _WINDOW_SECONDS = 60
 def _estimate_tokens_from_messages(
     messages, model="gpt-5-mini", expected_output=EXPECTED_OUTPUT_TOKENS_DEFAULT
 ):
-    """
-    Best-effort token estimator.
-    Tries tiktoken if available, else falls back to chars/4 heuristic.
-    """
+    """Best-effort token estimator using tiktoken or char/4 heuristic."""
     total_prompt_text = ""
     for m in messages:
-        # messages are dicts: {"role": "...", "content": "..."} (or content list)
         c = m.get("content", "")
         if isinstance(c, list):
-            # if user is using multi-part content, join text parts
             parts = []
             for item in c:
                 if isinstance(item, dict) and item.get("type") == "text":
@@ -57,12 +66,9 @@ def _estimate_tokens_from_messages(
             c = str(c)
         total_prompt_text += c
 
-    # Try tiktoken for better accuracy
     try:
         import tiktoken
 
-        # Model families: gpt-4/4o often map to cl100k_base / o200k_base.
-        # For GPT-5 family, o200k_base is typically appropriate; fall back gracefully.
         try:
             enc = tiktoken.encoding_for_model(model)
         except Exception:
@@ -72,10 +78,8 @@ def _estimate_tokens_from_messages(
                 enc = tiktoken.get_encoding("cl100k_base")
         prompt_tokens = len(enc.encode(total_prompt_text))
     except Exception:
-        # Heuristic: ~4 chars per token (English)
         prompt_tokens = max(1, len(total_prompt_text) // 4)
 
-    # add expected output tokens to budget (upper bound to be safe)
     return prompt_tokens + int(expected_output)
 
 
@@ -85,17 +89,12 @@ def _admit_or_wait(
     expected_output=EXPECTED_OUTPUT_TOKENS_DEFAULT,
     logger=None,
 ):
-    """
-    Blocks until adding this request would keep us under TPM_SOFT_CAP within the rolling 60s window.
-    - If the window is empty and we exceed the soft cap, we allow immediately (soft cap is a guideline).
-    - If the estimated tokens exceed the HARD TPM limit, raise a clear error before sending.
-    """
+    """TPM rate limiting: blocks until request fits within rolling 60s window."""
     want = _estimate_tokens_from_messages(
         messages, model=model, expected_output=expected_output
     )
     now = time.time()
 
-    # Drop old entries
     while _token_window and now - _token_window[0][0] > _WINDOW_SECONDS:
         _token_window.popleft()
 
@@ -105,52 +104,36 @@ def _admit_or_wait(
             f"TPM gate: used={used}, want={want}, soft_cap={TPM_SOFT_CAP}, hard_cap={TPM_LIMIT}"
         )
 
-    # Hard guard: one call larger than HARD limit will be rejected by the API
     if want > TPM_LIMIT:
-        msg = (
-            f"Estimated tokens for a single request ({want}) exceed your hard TPM limit ({TPM_LIMIT}). "
-            "Reduce input size and/or set max_tokens, or split the request."
-        )
+        msg = f"Estimated tokens ({want}) exceed hard TPM limit ({TPM_LIMIT}). Reduce input size."
         if logger:
             logger.error(msg)
         raise RuntimeError(msg)
 
-    # While we'd exceed the SOFT cap, decide whether to wait
     while used + want > TPM_SOFT_CAP:
-        # If the window is empty, waiting won't help; allow immediately (soft cap is just headroom)
         if not _token_window:
             if logger:
                 logger.info(
-                    "TPM gate: window empty and want exceeds soft cap; allowing request (soft cap bypass)."
+                    "TPM gate: window empty, allowing request (soft cap bypass)"
                 )
             break
 
-        # Otherwise, sleep until the oldest entry slides out of the 60s window
         sleep_for = _WINDOW_SECONDS - (now - _token_window[0][0])
         sleep_for = max(0.05, sleep_for)
         if logger:
-            logger.info(
-                f"TPM gate sleeping {sleep_for:.2f}s (used={used}, want={want}, cap={TPM_SOFT_CAP})"
-            )
+            logger.info(f"TPM gate sleeping {sleep_for:.2f}s")
         time.sleep(sleep_for)
 
-        # Recompute after sleeping
         now = time.time()
         while _token_window and now - _token_window[0][0] > _WINDOW_SECONDS:
             _token_window.popleft()
         used = sum(t for _, t in _token_window)
 
-    # Admit the request: record its estimated cost into the rolling window
     _token_window.append((time.time(), want))
 
 
-# ========= 429 Backoff with Retry-After (Solution #2) =========
 def _post_with_backoff(url, headers, json_payload, max_retries=6, logger=None):
-    """
-    POST with handling for 429 rate limits:
-    - Respect Retry-After header if present
-    - Exponential backoff + jitter
-    """
+    """POST with exponential backoff for 429 rate limits."""
     wait = 1.0
     for attempt in range(max_retries):
         resp = requests.post(url, headers=headers, json=json_payload)
@@ -170,25 +153,18 @@ def _post_with_backoff(url, headers, json_payload, max_retries=6, logger=None):
             except Exception:
                 err_json = {}
             logger.warning(
-                f"429 received. attempt={attempt + 1}/{max_retries}, retrying in ~{wait:.2f}s; error={err_json}"
+                f"429 received. attempt={attempt + 1}/{max_retries}, retrying in ~{wait:.2f}s"
             )
 
-        time.sleep(wait + random.uniform(0, 0.250))  # jitter
-        wait = min(wait * 2, 20.0)  # cap wait
+        time.sleep(wait + random.uniform(0, 0.250))
+        wait = min(wait * 2, 20.0)
 
-    return resp  # return the last response (likely 429) so caller can raise
-
-
-# ========= Context Optimization & Chunking (Solution #3) =========
-# Intelligent code chunking and context reduction to minimize token usage
-# while maintaining high-quality results
+    return resp
 
 
+# ========= Context Optimization =========
 def estimate_tokens(text: str, model: str = "gpt-5-mini") -> int:
-    """
-    Accurately estimate tokens for a given text.
-    Returns token count as integer.
-    """
+    """Accurately estimate tokens for a given text."""
     try:
         import tiktoken
 
@@ -201,7 +177,6 @@ def estimate_tokens(text: str, model: str = "gpt-5-mini") -> int:
                 enc = tiktoken.get_encoding("cl100k_base")
         return len(enc.encode(text))
     except Exception:
-        # Fallback: ~4 chars per token
         return max(1, len(text) // 4)
 
 
@@ -215,9 +190,8 @@ def extract_code_structure(code: str, file_path: str) -> str:
         file_path: File path for language detection
 
     Returns:
-        Structured outline of the code
+        Structured outline of the code as a string
     """
-    # Detect language from file extension
     ext = file_path.split(".")[-1].lower()
 
     if ext in ["py", "pyx", "pyi"]:
@@ -284,7 +258,6 @@ def _extract_python_structure(code: str) -> str:
                         # Add method docstring
                         method_doc = ast.get_docstring(item)
                         if method_doc:
-                            # Use first line of docstring only
                             first_line = method_doc.split("\n")[0]
                             structure.append(f'        """{first_line}"""')
 
@@ -309,13 +282,10 @@ def _extract_python_structure(code: str) -> str:
 
         result = "\n".join(structure)
         if not result.strip():
-            # Fallback: return first 30 lines
             return "\n".join(code.split("\n")[:30])
         return result
 
-    except Exception as e:
-        # If parsing fails, return first 30 lines
-        # Note: logger may not be initialized yet at import time
+    except Exception:
         return "\n".join(code.split("\n")[:30])
 
 
@@ -343,7 +313,7 @@ def _extract_javascript_structure(code: str) -> str:
     func_patterns = [
         r"^\s*(export\s+)?(async\s+)?function\s+(\w+)\s*\([^)]*\)",
         r"^\s*(const|let|var)\s+(\w+)\s*=\s*(async\s*)?\([^)]*\)\s*=>",
-        r"^\s*(\w+)\s*\([^)]*\)\s*\{",  # Method definitions
+        r"^\s*(\w+)\s*\([^)]*\)\s*\{",
     ]
 
     for pattern in func_patterns:
@@ -352,7 +322,7 @@ def _extract_javascript_structure(code: str) -> str:
             if not line.strip().startswith("//"):
                 structure.append(line)
 
-    result = "\n".join(structure[:50])  # Limit to 50 items
+    result = "\n".join(structure[:50])
     return result if result.strip() else "\n".join(lines[:30])
 
 
@@ -426,7 +396,7 @@ def _extract_c_structure(code: str) -> str:
     # Extract function signatures, structs, classes
     patterns = [
         r"^\s*(struct|class|enum)\s+\w+",
-        r"^\s*\w+[\s\*]+\w+\s*\([^)]*\)\s*[;{]",  # Function signatures
+        r"^\s*\w+[\s\*]+\w+\s*\([^)]*\)\s*[;{]",
     ]
 
     for pattern in patterns:
@@ -459,7 +429,6 @@ def chunk_large_file(
     if ext in ["py", "pyx", "pyi"]:
         return _chunk_python_file(code, max_tokens)
     else:
-        # For other languages, use line-based chunking
         return _chunk_by_lines(code, max_tokens)
 
 
@@ -471,10 +440,8 @@ def _chunk_python_file(code: str, max_tokens: int) -> List[Dict[str, Any]]:
         tree = ast.parse(code)
         lines = code.split("\n")
 
-        # Get module-level imports and docstring
+        # Get module-level imports
         imports = []
-        module_docstring = ast.get_docstring(tree)
-
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 if hasattr(node, "lineno"):
@@ -490,7 +457,6 @@ def _chunk_python_file(code: str, max_tokens: int) -> List[Dict[str, Any]]:
                     node.end_lineno if hasattr(node, "end_lineno") else start_line + 50
                 )
 
-                # Get the code for this node
                 node_code = "\n".join(lines[start_line:end_line])
                 node_tokens = estimate_tokens(node_code)
 
@@ -512,7 +478,7 @@ def _chunk_python_file(code: str, max_tokens: int) -> List[Dict[str, Any]]:
                         "type": chunk_type,
                         "name": node.name,
                         "tokens": node_tokens,
-                        "priority": 1,  # Default priority
+                        "priority": 1,
                     }
                 )
 
@@ -530,15 +496,14 @@ def _chunk_python_file(code: str, max_tokens: int) -> List[Dict[str, Any]]:
             ]
         )
 
-    except Exception as e:
-        # Fallback to line-based chunking
+    except Exception:
         return _chunk_by_lines(code, max_tokens)
 
 
 def _extract_class_structure(node: ast.ClassDef, lines: List[str]) -> str:
     """Extract class structure with method signatures."""
     start = node.lineno - 1
-    structure = [lines[start]]  # Class definition
+    structure = [lines[start]]
 
     docstring = ast.get_docstring(node)
     if docstring:
@@ -556,7 +521,7 @@ def _extract_class_structure(node: ast.ClassDef, lines: List[str]) -> str:
 def _extract_function_structure(node: ast.FunctionDef, lines: List[str]) -> str:
     """Extract function signature with docstring."""
     start = node.lineno - 1
-    structure = [lines[start]]  # Function definition
+    structure = [lines[start]]
 
     docstring = ast.get_docstring(node)
     if docstring:
@@ -661,12 +626,17 @@ def optimize_context_for_budget(
         content = file_info["content"]
         tokens = file_info["tokens"]
 
-        # Check if we can fit the full file
+        remaining_budget = token_budget - used_tokens
+        if remaining_budget < 100:  # Not enough space left
+            break
+
+        # Strategy 1: Fit full file
         if used_tokens + tokens <= token_budget:
             context_parts.append(f"--- File: {file_path} ---\n{content}")
             used_tokens += tokens
+
+        # Strategy 2: Extract structure for large files
         elif use_structure_for_large and tokens > per_file_budget:
-            # Extract structure for large files
             structure = extract_code_structure(content, file_path)
             structure_tokens = estimate_tokens(structure)
 
@@ -675,32 +645,38 @@ def optimize_context_for_budget(
                     f"--- File: {file_path} (structure only) ---\n{structure}"
                 )
                 used_tokens += structure_tokens
-            else:
-                # Skip this file - exceeds budget
-                pass
-        else:
-            # Try to fit a truncated version
-            remaining_budget = token_budget - used_tokens
-            if remaining_budget > 100:  # Only if we have meaningful space
-                # Estimate how many lines we can fit
-                lines = content.split("\n")
-                approx_lines = int(remaining_budget * 4 / (len(content) / len(lines)))
-                truncated = "\n".join(lines[:approx_lines])
 
+        # Strategy 3: Truncate to fit
+        else:
+            lines = content.split("\n")
+            if not lines:
+                continue
+
+            # Estimate lines that fit
+            avg_chars_per_line = len(content) / len(lines) if len(lines) > 0 else 80
+            approx_lines = int(remaining_budget * 4 / avg_chars_per_line)
+            approx_lines = max(10, min(approx_lines, len(lines)))
+
+            truncated = "\n".join(lines[:approx_lines])
+            truncated_tokens = estimate_tokens(truncated)
+
+            if truncated_tokens <= remaining_budget:
                 context_parts.append(
                     f"--- File: {file_path} (truncated) ---\n{truncated}\n... (truncated)"
                 )
-                used_tokens = token_budget  # Budget exhausted
-                break
+                used_tokens += truncated_tokens
 
     result = "\n\n".join(context_parts)
-    # Log optimization stats if logger is available
+
+    # Log optimization stats
     try:
         logger.info(
-            f"Context optimization: {len(file_tokens)} files -> {len(context_parts)} included, {used_tokens}/{token_budget} tokens used"
+            f"Context optimization: {len(files_content_map)} files -> "
+            f"{len(context_parts)} included, {used_tokens}/{token_budget} tokens used"
         )
     except NameError:
-        pass  # Logger not yet initialized
+        pass
+
     return result
 
 
@@ -727,7 +703,7 @@ def get_smart_context(
     for i in indices:
         if 0 <= i < len(files_data):
             path, content = files_data[i]
-            files_content_map[f"{i} # {path}"] = content
+            files_content_map[path] = content
 
     # Optimize and return
     return optimize_context_for_budget(
@@ -738,24 +714,24 @@ def get_smart_context(
     )
 
 
-# Configure logging
+# ========= Logging Setup =========
 log_directory = os.getenv("LOG_DIR", "logs")
 os.makedirs(log_directory, exist_ok=True)
 log_file = os.path.join(
     log_directory, f"llm_calls_{datetime.now().strftime('%Y%m%d')}.log"
 )
 
-# Set up logger
 logger = logging.getLogger("llm_logger")
 logger.setLevel(logging.INFO)
-logger.propagate = False  # Prevent propagation to root logger
+logger.propagate = False
 file_handler = logging.FileHandler(log_file, encoding="utf-8")
 file_handler.setFormatter(
     logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 )
 logger.addHandler(file_handler)
 
-# Simple cache configuration
+
+# ========= Cache Configuration =========
 cache_file = "llm_cache.json"
 
 
@@ -764,7 +740,7 @@ def load_cache():
         with open(cache_file, "r") as f:
             return json.load(f)
     except:
-        logger.warning(f"Failed to load cache.")
+        logger.warning("Failed to load cache.")
     return {}
 
 
@@ -773,44 +749,75 @@ def save_cache(cache):
         with open(cache_file, "w") as f:
             json.dump(cache, f)
     except:
-        logger.warning(f"Failed to save cache")
+        logger.warning("Failed to save cache")
 
 
-def get_llm_provider():
-    provider = os.getenv("LLM_PROVIDER")
-    if not provider and (os.getenv("GEMINI_PROJECT_ID") or os.getenv("GEMINI_API_KEY")):
-        provider = "GEMINI"
-    # if necessary, add ANTHROPIC/OPENAI
-    return provider
+# ========= PROVIDER IMPLEMENTATIONS =========
 
 
-def _call_anthropic(prompt: str, model: str, api_key: str) -> str:
+def _call_openai(prompt: str) -> str:
     """
-    Call Anthropic's Claude API using their native format.
+    Call OpenAI API directly.
+    Env vars: OPEN_AI_MODEL, OPEN_AI_API_KEY, OPEN_AI_BASE_URL (optional)
     """
+    model = os.environ.get("OPEN_AI_MODEL")
+    api_key = os.environ.get("OPEN_AI_API_KEY")
+    base_url = os.environ.get("OPEN_AI_BASE_URL", "https://api.openai.com/v1")
+
+    if not model:
+        raise ValueError("OPEN_AI_MODEL environment variable is required")
+    if not api_key:
+        raise ValueError("OPEN_AI_API_KEY environment variable is required")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    messages = [{"role": "user", "content": prompt}]
+    _admit_or_wait(messages, model=model, logger=logger)
+
+    payload = {"model": model, "messages": messages}
+    if not model.startswith("gpt-5"):
+        payload["temperature"] = 0.7
+
+    try:
+        response = _post_with_backoff(url, headers, payload, logger=logger)
+        response_json = response.json()
+        logger.info("OpenAI response received")
+        response.raise_for_status()
+        return response_json["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise Exception(f"OpenAI API error: {e}")
+
+
+def _call_anthropic(prompt: str) -> str:
+    """
+    Call Anthropic's Claude API.
+    Env vars: ANTHROPIC_MODEL, ANTHROPIC_API_KEY
+    """
+    model = os.environ.get("ANTHROPIC_MODEL")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    if not model:
+        raise ValueError("ANTHROPIC_MODEL environment variable is required")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+
     url = "https://api.anthropic.com/v1/messages"
-
     headers = {
         "Content-Type": "application/json",
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
     }
 
-    # Build messages for TPM admission (using OpenAI format for token estimation)
-    messages_for_tpm = [{"role": "user", "content": prompt}]
-
-    # Get max tokens from environment or use default
     max_tokens = int(os.getenv("LLM_MAX_TOKENS", "8192"))
-
-    # ---- Solution #1: Token gate before sending ----
+    messages_for_tpm = [{"role": "user", "content": prompt}]
     _admit_or_wait(
-        messages_for_tpm,
-        model=model,
-        expected_output=max_tokens,
-        logger=logger,
+        messages_for_tpm, model=model, expected_output=max_tokens, logger=logger
     )
 
-    # Anthropic's native API format
     payload = {
         "model": model,
         "max_tokens": max_tokens,
@@ -818,85 +825,40 @@ def _call_anthropic(prompt: str, model: str, api_key: str) -> str:
     }
 
     try:
-        # ---- Solution #2: Backoff-aware POST ----
-        response = _post_with_backoff(
-            url, headers, payload, max_retries=6, logger=logger
-        )
-
-        # Log and raise if needed
-        response_json = {}
-        try:
-            response_json = response.json()
-            logger.info("RESPONSE:\n%s", json.dumps(response_json, indent=2))
-        except Exception:
-            logger.warning("Failed to parse JSON for logging")
-
+        response = _post_with_backoff(url, headers, payload, logger=logger)
+        response_json = response.json()
+        logger.info("Anthropic response received")
         response.raise_for_status()
-
-        # Anthropic returns content in a different format
         return response_json["content"][0]["text"]
-
-    except requests.exceptions.HTTPError as e:
-        error_message = f"HTTP error occurred: {e}"
-        try:
-            error_details = response.json().get("error", "No additional details")
-            error_message += f" (Details: {error_details})"
-        except Exception:
-            pass
-        raise Exception(error_message)
-    except requests.exceptions.ConnectionError:
-        raise Exception(
-            f"Failed to connect to Anthropic API. Check your network connection."
-        )
-    except requests.exceptions.Timeout:
-        raise Exception(f"Request to Anthropic API timed out.")
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"An error occurred while making the request to Anthropic: {e}")
-    except (ValueError, KeyError) as e:
-        raise Exception(f"Failed to parse response from Anthropic. Error: {e}")
+    except Exception as e:
+        raise Exception(f"Anthropic API error: {e}")
 
 
-def _call_qwen(prompt: str, model: str, api_key: str, base_url: str) -> str:
+def _call_qwen(prompt: str) -> str:
     """
     Call Alibaba Cloud's Qwen API using OpenAI SDK.
-    The API is OpenAI-compatible, so we can use the OpenAI client.
+    Env vars: QWEN_MODEL, QWEN_API_KEY, QWEN_BASE_URL, QWEN_ENABLE_THINKING (optional)
     """
     try:
         from openai import OpenAI
     except ImportError:
-        raise Exception(
-            "OpenAI SDK is required for Qwen. Install it with: pip install openai"
-        )
+        raise Exception("OpenAI SDK required for Qwen. Install: pip install openai")
 
-    # Initialize OpenAI client with Qwen's base URL
-    client = OpenAI(
-        api_key=api_key,
-        base_url=base_url,
-    )
+    model = os.environ.get("QWEN_MODEL")
+    api_key = os.environ.get("QWEN_API_KEY")
+    base_url = os.environ.get("QWEN_BASE_URL")
 
-    # Build messages for TPM admission
+    if not model or not api_key or not base_url:
+        raise ValueError("QWEN_MODEL, QWEN_API_KEY, and QWEN_BASE_URL are required")
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
     messages = [{"role": "user", "content": prompt}]
-
-    # Get max tokens from environment or use default
     max_tokens = int(os.getenv("LLM_MAX_TOKENS", "16384"))
 
-    # ---- Solution #1: Token gate before sending ----
-    _admit_or_wait(
-        messages,
-        model=model,
-        expected_output=max_tokens,
-        logger=logger,
-    )
+    _admit_or_wait(messages, model=model, expected_output=max_tokens, logger=logger)
 
-    # Prepare completion parameters
-    completion_params = {
-        "model": model,
-        "messages": messages,
-    }
+    completion_params = {"model": model, "messages": messages}
 
-    # Handle enable_thinking parameter for Qwen3 models
-    # For commercial models like qwen3-max, enable_thinking defaults to False
-    # For open source models, it defaults to True, which may cause errors without streaming
     enable_thinking = os.getenv("QWEN_ENABLE_THINKING", "").lower()
     if enable_thinking == "false":
         completion_params["extra_body"] = {"enable_thinking": False}
@@ -905,191 +867,17 @@ def _call_qwen(prompt: str, model: str, api_key: str, base_url: str) -> str:
 
     try:
         logger.info(f"Calling Qwen API with model: {model}")
-
         completion = client.chat.completions.create(**completion_params)
-
-        response_text = completion.choices[0].message.content
-
-        # Log the response
-        logger.info(f"Qwen API response received: {len(response_text)} characters")
-
-        return response_text
-
+        return completion.choices[0].message.content
     except Exception as e:
-        error_message = f"Qwen API error: {e}"
-        logger.error(error_message)
-        raise Exception(error_message)
+        raise Exception(f"Qwen API error: {e}")
 
 
-def _call_llm_provider(prompt: str) -> str:
+def _call_gemini(prompt: str) -> str:
     """
-    Call an LLM provider based on environment variables.
-    Environment variables:
-    - LLM_PROVIDER: "ANTHROPIC", "QWEN", "OPEN_AI", "OLLAMA", "XAI", etc.
-    - <provider>_MODEL: Model name (e.g., ANTHROPIC_MODEL, QWEN_MODEL, OPEN_AI_MODEL)
-    - <provider>_BASE_URL: Base URL (required for QWEN, OPEN_AI, etc., not needed for ANTHROPIC)
-    - <provider>_API_KEY: API key
-
-    Note: ANTHROPIC and QWEN have special handling and use their own dedicated functions.
-    Other providers use OpenAI-compatible API with /chat/completions endpoint.
+    Call Google Gemini API.
+    Env vars: GEMINI_PROJECT_ID or GEMINI_API_KEY, GEMINI_LOCATION, GEMINI_MODEL
     """
-    logger.info(f"PROMPT: {prompt}")  # log the prompt
-
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()  # loads variables from a .env file into os.environ
-    except Exception:
-        pass
-
-    provider = os.environ.get("LLM_PROVIDER")
-    if not provider:
-        raise ValueError("LLM_PROVIDER environment variable is required")
-
-    # Special handling for Anthropic
-    if provider == "ANTHROPIC":
-        model = os.environ.get("ANTHROPIC_MODEL")
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-
-        if not model:
-            raise ValueError("ANTHROPIC_MODEL environment variable is required")
-        if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY environment variable is required")
-
-        return _call_anthropic(prompt, model, api_key)
-
-    # Special handling for Qwen
-    if provider == "QWEN":
-        model = os.environ.get("QWEN_MODEL")
-        api_key = os.environ.get("QWEN_API_KEY")
-        base_url = os.environ.get("QWEN_BASE_URL")
-
-        if not model:
-            raise ValueError("QWEN_MODEL environment variable is required")
-        if not api_key:
-            raise ValueError("QWEN_API_KEY environment variable is required")
-        if not base_url:
-            raise ValueError("QWEN_BASE_URL environment variable is required")
-
-        return _call_qwen(prompt, model, api_key, base_url)
-
-    # OpenAI-compatible providers (OPEN_AI, OLLAMA, XAI, etc.)
-    model_var = f"{provider}_MODEL"
-    base_url_var = f"{provider}_BASE_URL"
-    api_key_var = f"{provider}_API_KEY"
-
-    model = os.environ.get(model_var)
-    base_url = os.environ.get(base_url_var)
-    api_key = os.environ.get(api_key_var, "")
-
-    if not model:
-        raise ValueError(f"{model_var} environment variable is required")
-    if not base_url:
-        raise ValueError(f"{base_url_var} environment variable is required")
-
-    url = f"{base_url.rstrip('/')}/chat/completions"
-
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    # Build messages first (for TPM admission)
-    messages = [{"role": "user", "content": prompt}]
-
-    # ---- Solution #1: Token gate before sending ----
-    # If you know your typical max output, set via env LLM_EXPECTED_OUTPUT_TOKENS
-    _admit_or_wait(
-        messages,
-        model=model,
-        expected_output=EXPECTED_OUTPUT_TOKENS_DEFAULT,
-        logger=logger,
-    )
-
-    # Prepare payload; omit temperature for GPT-5* (or set to 1) to avoid unsupported_value
-    payload = {
-        "model": model,
-        "messages": messages,
-        # "max_tokens": 512,  # optional but recommended to prevent runaway outputs
-    }
-    if not model.startswith("gpt-5"):
-        payload["temperature"] = 0.7  # safe for most non-5 models; remove if you prefer
-
-    try:
-        # ---- Solution #2: Backoff-aware POST ----
-        response = _post_with_backoff(
-            url, headers, payload, max_retries=6, logger=logger
-        )
-
-        # Log and raise if needed
-        response_json = {}
-        try:
-            response_json = response.json()
-            logger.info("RESPONSE:\n%s", json.dumps(response_json, indent=2))
-        except Exception:
-            logger.warning("Failed to parse JSON for logging")
-
-        response.raise_for_status()
-        return response_json["choices"][0]["message"]["content"]
-
-    except requests.exceptions.HTTPError as e:
-        error_message = f"HTTP error occurred: {e}"
-        try:
-            error_details = response.json().get("error", "No additional details")
-            error_message += f" (Details: {error_details})"
-        except Exception:
-            pass
-        raise Exception(error_message)
-    except requests.exceptions.ConnectionError:
-        raise Exception(
-            f"Failed to connect to {provider} API. Check your network connection."
-        )
-    except requests.exceptions.Timeout:
-        raise Exception(f"Request to {provider} API timed out.")
-    except requests.exceptions.RequestException as e:
-        raise Exception(
-            f"An error occurred while making the request to {provider}: {e}"
-        )
-    except ValueError:
-        raise Exception(
-            f"Failed to parse response as JSON from {provider}. The server might have returned an invalid response."
-        )
-
-
-# By default, we Google Gemini 2.5 pro, as it shows great performance for code understanding
-def call_llm(prompt: str, use_cache: bool = True) -> str:
-    # Log the prompt
-    logger.info(f"PROMPT: {prompt}")
-
-    # Check cache if enabled
-    if use_cache:
-        # Load cache from disk
-        cache = load_cache()
-        # Return from cache if exists
-        if prompt in cache:
-            logger.info(f"RESPONSE: {cache[prompt]}")
-            return cache[prompt]
-
-    provider = get_llm_provider()
-    if provider == "GEMINI":
-        response_text = _call_llm_gemini(prompt)
-    else:  # generic method using a URL that is OpenAI compatible API (Ollama, ...)
-        response_text = _call_llm_provider(prompt)
-
-    # Log the response
-    logger.info(f"RESPONSE: {response_text}")
-
-    # Update cache if enabled
-    if use_cache:
-        # Load cache again to avoid overwrites
-        cache = load_cache()
-        # Add to cache and save
-        cache[prompt] = response_text
-        save_cache(cache)
-
-    return response_text
-
-
-def _call_llm_gemini(prompt: str) -> str:
     if os.getenv("GEMINI_PROJECT_ID"):
         client = genai.Client(
             vertexai=True,
@@ -1099,18 +887,204 @@ def _call_llm_gemini(prompt: str) -> str:
     elif os.getenv("GEMINI_API_KEY"):
         client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
     else:
-        raise ValueError(
-            "Either GEMINI_PROJECT_ID or GEMINI_API_KEY must be set in the environment"
-        )
+        raise ValueError("Either GEMINI_PROJECT_ID or GEMINI_API_KEY must be set")
+
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-pro-exp-03-25")
-    response = client.models.generate_content(model=model, contents=[prompt])
-    return response.text
+
+    try:
+        logger.info(f"Calling Gemini API with model: {model}")
+        response = client.models.generate_content(model=model, contents=[prompt])
+        return response.text
+    except Exception as e:
+        raise Exception(f"Gemini API error: {e}")
+
+
+def _call_ollama(prompt: str) -> str:
+    """
+    Call Ollama (local model server).
+    Env vars: OLLAMA_MODEL, OLLAMA_BASE_URL
+    """
+    model = os.environ.get("OLLAMA_MODEL")
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+
+    if not model:
+        raise ValueError("OLLAMA_MODEL environment variable is required")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+
+    messages = [{"role": "user", "content": prompt}]
+    payload = {"model": model, "messages": messages}
+
+    try:
+        logger.info(f"Calling Ollama with model: {model}")
+        response = requests.post(url, headers=headers, json=payload)
+        response_json = response.json()
+        response.raise_for_status()
+        return response_json["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise Exception(f"Ollama API error: {e}")
+
+
+def _call_xai(prompt: str) -> str:
+    """
+    Call xAI API (Grok models).
+    Env vars: XAI_MODEL, XAI_API_KEY, XAI_BASE_URL
+    """
+    model = os.environ.get("XAI_MODEL")
+    api_key = os.environ.get("XAI_API_KEY")
+    base_url = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1")
+
+    if not model or not api_key:
+        raise ValueError("XAI_MODEL and XAI_API_KEY are required")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    messages = [{"role": "user", "content": prompt}]
+    _admit_or_wait(messages, model=model, logger=logger)
+
+    payload = {"model": model, "messages": messages, "temperature": 0.7}
+
+    try:
+        logger.info(f"Calling xAI with model: {model}")
+        response = _post_with_backoff(url, headers, payload, logger=logger)
+        response_json = response.json()
+        response.raise_for_status()
+        return response_json["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise Exception(f"xAI API error: {e}")
+
+
+def _call_generic_openai_compatible(prompt: str, provider: str) -> str:
+    """
+    Generic handler for OpenAI-compatible APIs.
+    Env vars: {PROVIDER}_MODEL, {PROVIDER}_API_KEY, {PROVIDER}_BASE_URL
+    """
+    model = os.environ.get(f"{provider}_MODEL")
+    api_key = os.environ.get(f"{provider}_API_KEY")
+    base_url = os.environ.get(f"{provider}_BASE_URL")
+
+    if not model or not base_url:
+        raise ValueError(f"{provider}_MODEL and {provider}_BASE_URL are required")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    messages = [{"role": "user", "content": prompt}]
+    _admit_or_wait(messages, model=model, logger=logger)
+
+    payload = {"model": model, "messages": messages, "temperature": 0.7}
+
+    try:
+        logger.info(f"Calling {provider} with model: {model}")
+        response = _post_with_backoff(url, headers, payload, logger=logger)
+        response_json = response.json()
+        response.raise_for_status()
+        return response_json["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise Exception(f"{provider} API error: {e}")
+
+
+# ========= Main Call Function =========
+
+
+def call_llm(prompt: str, use_cache: bool = True) -> str:
+    """
+    Main function to call an LLM provider based on LLM_PROVIDER env var.
+
+    Supported providers:
+    - OPENAI: OpenAI GPT models
+    - ANTHROPIC: Claude models
+    - QWEN: Alibaba Cloud Qwen models
+    - GEMINI: Google Gemini models
+    - OLLAMA: Local Ollama server
+    - XAI: xAI Grok models
+    - <CUSTOM>: Any OpenAI-compatible API
+
+    Args:
+        prompt: The prompt to send to the LLM
+        use_cache: Whether to use response caching
+
+    Returns:
+        The LLM's response text
+    """
+    logger.info(f"PROMPT: {prompt[:200]}...")  # Log first 200 chars
+
+    # Check cache if enabled
+    if use_cache:
+        cache = load_cache()
+        if prompt in cache:
+            logger.info("Response returned from cache")
+            return cache[prompt]
+
+    # Get provider from environment
+    provider = os.environ.get("LLM_PROVIDER")
+
+    # Auto-detect Gemini if not specified
+    if not provider and (os.getenv("GEMINI_PROJECT_ID") or os.getenv("GEMINI_API_KEY")):
+        provider = "GEMINI"
+
+    if not provider:
+        raise ValueError("LLM_PROVIDER environment variable is required")
+
+    # Route to appropriate provider
+    provider = provider.upper()
+
+    try:
+        if provider == "OPENAI" or provider == "OPEN_AI":
+            response_text = _call_openai(prompt)
+        elif provider == "ANTHROPIC":
+            response_text = _call_anthropic(prompt)
+        elif provider == "QWEN":
+            response_text = _call_qwen(prompt)
+        elif provider == "GEMINI":
+            response_text = _call_gemini(prompt)
+        elif provider == "OLLAMA":
+            response_text = _call_ollama(prompt)
+        elif provider == "XAI":
+            response_text = _call_xai(prompt)
+        else:
+            # Try generic OpenAI-compatible handler
+            logger.info(
+                f"Using generic OpenAI-compatible handler for provider: {provider}"
+            )
+            response_text = _call_generic_openai_compatible(prompt, provider)
+
+    except Exception as e:
+        logger.error(f"LLM call failed: {e}")
+        raise
+
+    logger.info(f"RESPONSE: {response_text[:200]}...")  # Log first 200 chars
+
+    # Update cache if enabled
+    if use_cache:
+        cache = load_cache()
+        cache[prompt] = response_text
+        save_cache(cache)
+
+    return response_text
+
+
+# ========= Helper function for provider detection =========
+
+
+def get_llm_provider() -> str:
+    """Get the configured LLM provider."""
+    provider = os.getenv("LLM_PROVIDER")
+    if not provider and (os.getenv("GEMINI_PROJECT_ID") or os.getenv("GEMINI_API_KEY")):
+        provider = "GEMINI"
+    return provider
 
 
 if __name__ == "__main__":
+    # Test code
     test_prompt = "Hello, how are you?"
-
-    # First call - should hit the API
-    print("Making call...")
-    response1 = call_llm(test_prompt, use_cache=False)
-    print(f"Response: {response1}")
+    print("Making test call...")
+    response = call_llm(test_prompt, use_cache=False)
+    print(f"Response: {response}")
