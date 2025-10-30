@@ -186,6 +186,7 @@ class IdentifyAbstractions(Node):
         language = shared.get("language", "english")
         use_cache = shared.get("use_cache", True)
         max_abstraction_num = shared.get("max_abstraction_num", 10)
+        doc_mode = shared.get("doc_mode", "developer")
 
         token_budget = TOKEN_BUDGETS["identify_abstractions"]
 
@@ -219,6 +220,7 @@ class IdentifyAbstractions(Node):
             language,
             use_cache,
             max_abstraction_num,
+            doc_mode,
         )
 
     def exec(self, prep_res):
@@ -230,8 +232,9 @@ class IdentifyAbstractions(Node):
             language,
             use_cache,
             max_abstraction_num,
+            doc_mode,
         ) = prep_res
-        print(f"Identifying abstractions using LLM...")
+        print(f"Identifying abstractions using LLM (mode: {doc_mode})...")
 
         language_instruction = ""
         name_lang_hint = ""
@@ -241,18 +244,54 @@ class IdentifyAbstractions(Node):
             name_lang_hint = f" (value in {language.capitalize()})"
             desc_lang_hint = f" (value in {language.capitalize()})"
 
+        # MODE-SPECIFIC INSTRUCTIONS
+        if doc_mode == "developer":
+            mode_instruction = """
+Focus on TECHNICAL abstractions that developers need to understand:
+- Core classes, modules, and architectural components
+- Important design patterns and data structures
+- Key algorithms and processing logic
+- API endpoints and interfaces
+- Configuration and initialization systems
+
+Descriptions should be technical and include:
+- What the component does at a code level
+- Its role in the architecture
+- Key methods or functions it provides
+"""
+        else:  # user mode
+            mode_instruction = """
+Focus on BUSINESS abstractions that end-users and stakeholders need to understand:
+- User-facing features and workflows
+- Main application functionalities
+- Business processes and logic flows
+- Data models from a business perspective
+- Integration points with external systems
+
+Descriptions should be non-technical and include:
+- What the feature does for the user
+- Real-world use cases and benefits
+- How it fits into the overall product
+- Simple analogies to familiar concepts (avoid code-level details)
+"""
+
         prompt = f"""
 For the project `{project_name}`:
 
 Codebase Context:
 {context}
 
-{language_instruction}Analyze the codebase context.
-Identify the top 5-{max_abstraction_num} core most important abstractions to help those new to the codebase.
+{language_instruction}DOCUMENTATION MODE: {doc_mode.upper()}
+
+{mode_instruction}
+
+Analyze the codebase context and identify the top 5-{max_abstraction_num} most important abstractions based on the {doc_mode} perspective.
 
 For each abstraction, provide:
 1. A concise `name`{name_lang_hint}.
-2. A beginner-friendly `description` explaining what it is with a simple analogy, in around 100 words{desc_lang_hint}.
+2. A {"beginner-friendly" if doc_mode == "user" else "clear, technical"} `description` explaining what it is, in around 100-150 words{desc_lang_hint}.
+   {"- Use simple analogies and avoid technical jargon" if doc_mode == "user" else "- Include technical details and implementation context"}
+   {"- Focus on user benefits and business value" if doc_mode == "user" else "- Focus on architectural role and code structure"}
 3. A list of relevant `file_indices` (integers) using the format `idx # path/comment`.
 
 List of file indices and paths present in the context:
@@ -262,19 +301,18 @@ Format the output as a YAML list of dictionaries:
 
 ```yaml
 - name: |
-    Query Processing{name_lang_hint}
+    {"User Authentication System" if doc_mode == "user" else "Authentication Service Layer"}{name_lang_hint}
   description: |
-    Explains what the abstraction does.
-    It's like a central dispatcher routing requests.{desc_lang_hint}
+    {"This is how users securely access the application. Think of it like a digital doorman that checks ID cards - it verifies who you are and grants access to your account. The system ensures your data stays private and only you can access your information." if doc_mode == "user" else "Core authentication service implementing JWT-based token management. Handles user login, session management, and token validation. Uses bcrypt for password hashing and implements refresh token rotation for security."}{desc_lang_hint}
   file_indices:
-    - 0 # path/to/file1.py
-    - 3 # path/to/related.py
+    - 0 # path/to/auth_service.py
+    - 3 # path/to/jwt_handler.py
 - name: |
-    Query Optimization{name_lang_hint}
+    {"Payment Processing" if doc_mode == "user" else "Payment Gateway Integration Layer"}{name_lang_hint}
   description: |
-    Another core concept, similar to a blueprint for objects.{desc_lang_hint}
+    {"Handles all payment transactions securely. Like a digital cashier, it processes your credit card or payment method, ensures the transaction is safe, and confirms your purchase. It works with various payment providers to give you flexibility in how you pay." if doc_mode == "user" else "Abstraction layer for third-party payment gateways (Stripe, PayPal). Implements retry logic, webhook handling, and transaction state management. Ensures PCI compliance through tokenization."}{desc_lang_hint}
   file_indices:
-    - 5 # path/to/another.js
+    - 5 # path/to/payment_gateway.js
 # ... up to {max_abstraction_num} abstractions
 ```"""
         response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0))
@@ -333,7 +371,7 @@ Format the output as a YAML list of dictionaries:
                 }
             )
 
-        print(f"✓ Identified {len(validated_abstractions)} abstractions")
+        print(f"✓ Identified {len(validated_abstractions)} abstractions ({doc_mode} mode)")
         return validated_abstractions
 
     def post(self, shared, prep_res, exec_res):
@@ -354,6 +392,7 @@ class AnalyzeAndOrderChapters(Node):
         project_name = shared["project_name"]
         language = shared.get("language", "english")
         use_cache = shared.get("use_cache", True)
+        doc_mode = shared.get("doc_mode", "developer")
 
         num_abstractions = len(abstractions)
 
@@ -391,6 +430,7 @@ class AnalyzeAndOrderChapters(Node):
             project_name,
             language,
             use_cache,
+            doc_mode,
         )
 
     def exec(self, prep_res):
@@ -401,8 +441,9 @@ class AnalyzeAndOrderChapters(Node):
             project_name,
             language,
             use_cache,
+            doc_mode,
         ) = prep_res
-        print(f"Analyzing relationships and ordering chapters using LLM...")
+        print(f"Analyzing relationships and ordering chapters using LLM (mode: {doc_mode})...")
 
         language_instruction = ""
         lang_hint = ""
@@ -412,8 +453,62 @@ class AnalyzeAndOrderChapters(Node):
             lang_hint = f" (in {language.capitalize()})"
             list_lang_note = f" (Names might be in {language.capitalize()})"
 
+        # MODE-SPECIFIC INSTRUCTIONS
+        if doc_mode == "developer":
+            summary_instruction = """
+Write a technical `summary` of the project that:
+- Explains the overall architecture and technical approach
+- Highlights key technologies, frameworks, and design patterns used
+- Describes the main components and how they interact
+- Mentions notable technical decisions or innovations
+Target audience: Software developers who want to understand the codebase structure.
+"""
+            relationship_instruction = """
+For `relationships`, focus on TECHNICAL connections:
+- Code dependencies (imports, inheritance, composition)
+- Data flow between components
+- API calls and service interactions
+- Configuration and initialization order
+Use technical labels like: "Implements", "Extends", "Depends on", "Initializes", "Calls", "Provides data to"
+"""
+            ordering_instruction = """
+For `chapter_order`, arrange topics in a TECHNICAL learning path:
+1. Start with core infrastructure and base classes
+2. Move to main service/business logic layers
+3. Then specialized features and extensions
+4. End with configuration, utilities, and integration layers
+This helps developers build up from foundational code to higher-level features.
+"""
+        else:  # user mode
+            summary_instruction = """
+Write a business-focused `summary` of the project that:
+- Explains what the product does and who it's for
+- Highlights key features and benefits for end-users
+- Describes the main use cases and workflows
+- Mentions the business value and goals of the project
+Target audience: End-users, product managers, and non-technical stakeholders.
+"""
+            relationship_instruction = """
+For `relationships`, focus on BUSINESS/WORKFLOW connections:
+- How features work together in user workflows
+- Which features enable or support other features
+- Business process dependencies
+- User journey connections
+Use business labels like: "Enables", "Supports", "Feeds into", "Requires", "Enhances", "Complements"
+"""
+            ordering_instruction = """
+For `chapter_order`, arrange topics in a USER-CENTRIC learning path:
+1. Start with core user-facing features (what users see first)
+2. Move to supporting features that enhance the core experience
+3. Then advanced features and workflows
+4. End with administrative or configuration features
+This helps users understand the product from their perspective and natural usage flow.
+"""
+
         prompt = f"""
 Based on the following abstractions and relevant code snippets from the project `{project_name}`:
+
+DOCUMENTATION MODE: {doc_mode.upper()}
 
 List of Abstraction Indices and Names{list_lang_note}:
 {abstraction_listing}
@@ -422,34 +517,39 @@ Context (Abstractions, Descriptions, Code):
 {context}
 
 {language_instruction}Please provide:
-1. A high-level `summary` of the project's main purpose and functionality in a few beginner-friendly sentences{lang_hint}. Use markdown formatting with **bold** and *italic* text to highlight important concepts.
 
-2. A list (`relationships`) describing the key interactions between these abstractions. For each relationship, specify:
+1. PROJECT SUMMARY:
+{summary_instruction}
+Use markdown formatting with **bold** and *italic* text to highlight important concepts.
+
+2. RELATIONSHIPS:
+{relationship_instruction}
     - `from_abstraction`: Index of the source abstraction (e.g., `0 # AbstractionName1`)
     - `to_abstraction`: Index of the target abstraction (e.g., `1 # AbstractionName2`)
-    - `label`: A brief label for the interaction **in just a few words**{lang_hint} (e.g., "Manages", "Inherits", "Uses").
+    - `label`: A brief label for the interaction **in just a few words**{lang_hint}
     
 IMPORTANT: Make sure EVERY abstraction is involved in at least ONE relationship (either as source or target).
 
-3. A `chapter_order` list showing the best order to explain these abstractions in a tutorial, from first to last. Start with foundational or user-facing concepts, then move to detailed implementations. Use the format `idx # AbstractionName`.
+3. CHAPTER ORDER:
+{ordering_instruction}
+Use the format `idx # AbstractionName` for all {num_abstractions} abstractions.
 
 Format the output as YAML:
 
 ```yaml
 summary: |
-  A brief, simple explanation of the project{lang_hint}.
-  Can span multiple lines with **bold** and *italic* for emphasis.
+  {"**ProjectX** is a web application that helps small businesses manage their inventory and sales. It provides an intuitive interface for tracking products, processing orders, and generating reports. The system *streamlines operations* by automating routine tasks and providing real-time insights." if doc_mode == "user" else "**ProjectX** is built using a microservices architecture with Node.js and React. It implements *event-driven patterns* for scalability and uses PostgreSQL for data persistence. The system follows **Domain-Driven Design** principles with clear separation between API, business logic, and data layers."}{lang_hint}
 relationships:
-  - from_abstraction: 0 # AbstractionName1
-    to_abstraction: 1 # AbstractionName2
-    label: "Manages"{lang_hint}
-  - from_abstraction: 2 # AbstractionName3
-    to_abstraction: 0 # AbstractionName1
-    label: "Provides config"{lang_hint}
+  - from_abstraction: 0 # {"User Dashboard" if doc_mode == "user" else "AuthService"}
+    to_abstraction: 1 # {"Order Processing" if doc_mode == "user" else "UserRepository"}
+    label: "{"Displays" if doc_mode == "user" else "Queries"}"{lang_hint}
+  - from_abstraction: 2 # {"Inventory Management" if doc_mode == "user" else "OrderController"}
+    to_abstraction: 0 # {"User Dashboard" if doc_mode == "user" else "AuthService"}
+    label: "{"Updates" if doc_mode == "user" else "Authenticates with"}"{lang_hint}
 chapter_order:
-  - 2 # FoundationalConcept
-  - 0 # CoreClassA
-  - 1 # CoreClassB
+  - {"0 # User Dashboard" if doc_mode == "user" else "2 # CoreModule"}
+  - {"1 # Order Processing" if doc_mode == "user" else "0 # AuthService"}
+  - {"2 # Inventory Management" if doc_mode == "user" else "1 # UserRepository"}
   # ... all {num_abstractions} abstractions in order
 ```
 
@@ -531,7 +631,7 @@ Now, provide the YAML output:
             )
 
         print(
-            f"✓ Generated summary, {len(validated_relationships)} relationships, and chapter order"
+            f"✓ Generated summary, {len(validated_relationships)} relationships, and chapter order ({doc_mode} mode)"
         )
 
         return {
@@ -556,6 +656,7 @@ class WriteChapters(BatchNode):
         project_name = shared["project_name"]
         language = shared.get("language", "english")
         use_cache = shared.get("use_cache", True)
+        doc_mode = shared.get("doc_mode", "developer")
 
         self.chapters_written_so_far = []
 
@@ -608,6 +709,7 @@ class WriteChapters(BatchNode):
                         "next_chapter": next_chapter,
                         "language": language,
                         "use_cache": use_cache,
+                        "doc_mode": doc_mode,
                     }
                 )
             else:
@@ -615,7 +717,7 @@ class WriteChapters(BatchNode):
                     f"Warning: Invalid abstraction index {abstraction_index} in chapter_order"
                 )
 
-        print(f"Preparing to write {len(items_to_process)} chapters...")
+        print(f"Preparing to write {len(items_to_process)} chapters ({doc_mode} mode)...")
         return items_to_process
 
     def exec(self, item):
@@ -625,7 +727,9 @@ class WriteChapters(BatchNode):
         project_name = item.get("project_name")
         language = item.get("language", "english")
         use_cache = item.get("use_cache", True)
-        print(f"Writing chapter {chapter_num}: {abstraction_name[:50]}...")
+        doc_mode = item.get("doc_mode", "developer")
+        
+        print(f"Writing chapter {chapter_num} ({doc_mode} mode): {abstraction_name[:50]}...")
 
         token_budget = TOKEN_BUDGETS["write_chapter"]
         file_context_str = get_optimized_content_for_indices(
@@ -647,8 +751,356 @@ class WriteChapters(BatchNode):
             lang_cap = language.capitalize()
             language_instruction = f"IMPORTANT: Write this ENTIRE tutorial chapter in **{lang_cap}**. Translate ALL generated content including explanations, examples, and technical terms into {lang_cap}.\n\n"
 
+        # MODE-SPECIFIC INSTRUCTIONS
+        if doc_mode == "developer":
+            mode_specific_instructions = """
+DEVELOPER MODE - Technical Documentation:
+
+Structure your chapter with these sections:
+1. **Overview**: Technical introduction to the component
+2. **Architecture & Design**: How it's structured and why
+3. **Key Components**: Main classes, functions, or modules with code examples
+4. **Implementation Details**: 
+   - Code snippets showing important methods (keep each snippet under 15 lines)
+   - Explanation of algorithms or logic
+   - Design patterns used
+5. **API Reference**: Key functions/methods with parameters and return types
+6. **Usage Examples**: Practical code examples showing how to use this component
+7. **Integration Points**: How this connects to other parts of the codebase
+8. **Technical Considerations**: Performance, security, or scalability notes
+
+Style Guidelines:
+- Use technical terminology appropriately
+- Include code snippets with syntax highlighting
+- Show actual file paths and line numbers when referencing code
+- Explain WHY certain technical decisions were made
+- Use mermaid diagrams for complex architectural flows (see examples below)
+- Link to related technical chapters
+- Keep code examples focused and well-commented
+
+Example code block format:
+```python
+# From src/auth/jwt_handler.py
+def generate_token(user_id: str, expires_in: int = 3600) -> str:
+    \"\"\"Generate JWT token for authenticated user.
+    
+    Args:
+        user_id: Unique identifier for the user
+        expires_in: Token expiration time in seconds
+    
+    Returns:
+        Signed JWT token string
+    \"\"\"
+    payload = {
+        'user_id': user_id,
+        'exp': datetime.utcnow() + timedelta(seconds=expires_in)
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+```
+
+Mermaid Diagram Examples (Mermaid 11.6.0 Compatible):
+
+**1. Sequence Diagram** - For API calls, service interactions, authentication flows:
+```mermaid
+sequenceDiagram
+    participant Client
+    participant AuthService
+    participant Database
+    participant JWTHandler
+    
+    Client->>AuthService: POST /login
+    activate AuthService
+    AuthService->>Database: Verify credentials
+    activate Database
+    Database-->>AuthService: User data
+    deactivate Database
+    AuthService->>JWTHandler: Generate token
+    activate JWTHandler
+    JWTHandler-->>AuthService: JWT token
+    deactivate JWTHandler
+    AuthService-->>Client: 200 OK + token
+    deactivate AuthService
+```
+
+**2. Flowchart** - For algorithms, decision logic, processing flows:
+```mermaid
+flowchart TD
+    Start([Request Received]) --> ValidateInput{Valid Input?}
+    ValidateInput -->|No| ReturnError[Return 400 Error]
+    ValidateInput -->|Yes| CheckAuth{Authenticated?}
+    CheckAuth -->|No| ReturnUnauth[Return 401 Unauthorized]
+    CheckAuth -->|Yes| ProcessData[Process Request]
+    ProcessData --> CheckDB{Data Exists?}
+    CheckDB -->|No| CreateNew[Create New Record]
+    CheckDB -->|Yes| UpdateExisting[Update Existing]
+    CreateNew --> SaveDB[(Save to Database)]
+    UpdateExisting --> SaveDB
+    SaveDB --> ReturnSuccess[Return 200 Success]
+    ReturnError --> End([End])
+    ReturnUnauth --> End
+    ReturnSuccess --> End
+```
+
+**3. Class Diagram** - For object-oriented architecture, inheritance, relationships:
+```mermaid
+classDiagram
+    class BaseModel {
+        +UUID id
+        +DateTime created_at
+        +DateTime updated_at
+        +save() void
+        +delete() void
+        +to_dict() dict
+    }
+    
+    class User {
+        +String email
+        +String password_hash
+        +String role
+        +authenticate(password) bool
+        +generate_token() string
+    }
+    
+    class Order {
+        +UUID user_id
+        +Decimal total_amount
+        +String status
+        +List~OrderItem~ items
+        +calculate_total() Decimal
+        +process_payment() bool
+    }
+    
+    class OrderItem {
+        +UUID product_id
+        +Integer quantity
+        +Decimal price
+        +get_subtotal() Decimal
+    }
+    
+    BaseModel <|-- User
+    BaseModel <|-- Order
+    BaseModel <|-- OrderItem
+    User "1" --> "0..*" Order : places
+    Order "1" --> "1..*" OrderItem : contains
+```
+
+**4. State Diagram** - For state machines, workflow states, lifecycle management:
+```mermaid
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> PendingReview : submit()
+    PendingReview --> Approved : approve()
+    PendingReview --> Rejected : reject()
+    PendingReview --> Draft : request_changes()
+    Rejected --> Draft : revise()
+    Approved --> Published : publish()
+    Published --> Archived : archive()
+    Archived --> [*]
+    
+    Draft : Entry: initialize_data()
+    Draft : Do: allow_edits()
+    PendingReview : Entry: notify_reviewers()
+    Approved : Entry: log_approval()
+    Published : Entry: make_public()
+```
+
+**5. Entity Relationship Diagram** - For database schema, data models:
+```mermaid
+erDiagram
+    USER ||--o{ ORDER : places
+    USER {
+        uuid id PK
+        string email UK
+        string password_hash
+        string role
+        datetime created_at
+    }
+    
+    ORDER ||--|{ ORDER_ITEM : contains
+    ORDER {
+        uuid id PK
+        uuid user_id FK
+        decimal total_amount
+        string status
+        datetime created_at
+    }
+    
+    ORDER_ITEM }o--|| PRODUCT : references
+    ORDER_ITEM {
+        uuid id PK
+        uuid order_id FK
+        uuid product_id FK
+        integer quantity
+        decimal price
+    }
+    
+    PRODUCT {
+        uuid id PK
+        string name
+        string description
+        decimal price
+        integer stock
+    }
+```
+
+**6. Architecture Diagram (C4 Style)** - For system architecture, component relationships:
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        WebApp[Web Application]
+        MobileApp[Mobile App]
+    end
+    
+    subgraph "API Gateway"
+        Gateway[API Gateway<br/>Rate Limiting, Auth]
+    end
+    
+    subgraph "Service Layer"
+        AuthSvc[Auth Service<br/>JWT, OAuth]
+        OrderSvc[Order Service<br/>Business Logic]
+        PaymentSvc[Payment Service<br/>Stripe Integration]
+    end
+    
+    subgraph "Data Layer"
+        PostgreSQL[(PostgreSQL<br/>User & Order Data)]
+        Redis[(Redis<br/>Cache & Sessions)]
+        S3[(S3<br/>File Storage)]
+    end
+    
+    WebApp --> Gateway
+    MobileApp --> Gateway
+    Gateway --> AuthSvc
+    Gateway --> OrderSvc
+    OrderSvc --> PaymentSvc
+    AuthSvc --> PostgreSQL
+    AuthSvc --> Redis
+    OrderSvc --> PostgreSQL
+    OrderSvc --> Redis
+    PaymentSvc --> S3
+    
+    style AuthSvc fill:#e1f5ff
+    style OrderSvc fill:#e1f5ff
+    style PaymentSvc fill:#e1f5ff
+    style PostgreSQL fill:#ffe1e1
+    style Redis fill:#ffe1e1
+```
+
+**7. Timeline Diagram** - For deployment pipelines, version history, event sequences:
+```mermaid
+timeline
+    title Development Pipeline
+    section Development
+        Feature Branch : Code Changes
+                      : Unit Tests
+                      : Code Review
+    section Testing
+        Merge to Main : Integration Tests
+                     : Security Scan
+                     : Performance Tests
+    section Staging
+        Deploy Staging : End-to-End Tests
+                      : UAT Testing
+    section Production
+        Deploy Prod : Health Check
+                   : Monitor Metrics
+                   : Rollback Ready
+```
+
+**8. Git Graph** - For branching strategy, release management:
+```mermaid
+gitgraph
+    commit id: "Initial commit"
+    branch develop
+    checkout develop
+    commit id: "Add auth module"
+    branch feature/payment
+    checkout feature/payment
+    commit id: "Implement payment API"
+    commit id: "Add payment tests"
+    checkout develop
+    merge feature/payment
+    commit id: "Update docs"
+    checkout main
+    merge develop tag: "v1.0.0"
+    checkout develop
+    commit id: "Start v1.1 features"
+```
+
+**Diagram Selection Guidelines:**
+- **Sequence Diagrams**: API flows, authentication, multi-service interactions
+- **Flowcharts**: Algorithms, decision trees, processing logic
+- **Class Diagrams**: OOP architecture, design patterns, inheritance
+- **State Diagrams**: Lifecycle management, workflow states, state machines
+- **ER Diagrams**: Database schema, data relationships
+- **Architecture Diagrams**: System overview, component interactions
+- **Timeline**: CI/CD pipelines, deployment processes
+- **Git Graph**: Release strategy, branching workflows
+
+Choose the diagram type that best illustrates the technical concept being explained.
+"""
+        else:  # user mode
+            mode_specific_instructions = """
+USER MODE - Business-Focused Documentation:
+
+Structure your chapter with these sections:
+1. **What It Does**: Simple explanation of the feature's purpose
+2. **Why It Matters**: Business value and benefits for users
+3. **How It Works**: Step-by-step user workflow (NO CODE)
+4. **Key Features**: Main capabilities and functionalities
+5. **Use Cases**: Real-world scenarios where this feature shines
+   - Provide 2-3 concrete examples with user stories
+6. **How Features Connect**: Explain relationships to other features naturally
+7. **Tips & Best Practices**: Helpful advice for getting the most value
+8. **Common Questions**: Address typical user concerns
+
+Style Guidelines:
+- Use simple, non-technical language
+- Focus on USER ACTIONS and OUTCOMES, not code
+- Use analogies and metaphors to explain concepts
+- Include user workflow diagrams (not technical architecture)
+- Show screenshots or UI mockups if describing interfaces (use placeholders)
+- Explain benefits at each step
+- Use mermaid diagrams for USER JOURNEYS
+- Link to related feature chapters
+
+Example user workflow format:
+**Signing Up for an Account:**
+
+1. **Visit the signup page** - Click "Create Account" on the homepage
+2. **Enter your information** - Provide your email, name, and create a password
+3. **Verify your email** - Check your inbox for a confirmation link
+4. **Complete your profile** - Add additional details about your business
+5. **Start using the platform** - You're ready to go!
+
+Mermaid diagram example for user journey:
+```mermaid
+flowchart LR
+    A[New User Visits] --> B[Creates Account]
+    B --> C[Verifies Email]
+    C --> D[Completes Profile]
+    D --> E[Accesses Dashboard]
+    E --> F[Starts Using Features]
+    
+    style A fill:#e1f5ff
+    style F fill:#c8e6c9
+```
+
+Use case example:
+**Use Case: Small Retail Store Owner**
+
+Sarah owns a boutique clothing store and needs to track her inventory. Using the Inventory Management feature:
+- She quickly adds new products when shipments arrive
+- The system automatically updates stock levels as items sell
+- She receives alerts when items are running low
+- She can view sales trends to make better purchasing decisions
+
+This saves Sarah 5+ hours per week and helps prevent stockouts of popular items.
+"""
+
         prompt = f"""
-{language_instruction}Write a very beginner-friendly tutorial chapter (in Markdown format) for the project `{project_name}` about the concept: "{abstraction_name}". This is Chapter {chapter_num}.
+{language_instruction}DOCUMENTATION MODE: {doc_mode.upper()}
+
+Write a {"beginner-friendly" if doc_mode == "user" else "comprehensive technical"} tutorial chapter (in Markdown format) for the project `{project_name}` about: "{abstraction_name}". This is Chapter {chapter_num}.
 
 Concept Details:
 - Name: {abstraction_name}
@@ -661,18 +1113,19 @@ Complete Tutorial Structure:
 Context from previous chapters:
 {previous_chapters_summary if previous_chapters_summary else "This is the first chapter."}
 
-Relevant Code Snippets:
-{file_context_str if file_context_str else "No specific code snippets provided for this abstraction."}
+{"Relevant Code Snippets:" if doc_mode == "developer" else "Relevant Technical Context (translate to user perspective):"}
+{file_context_str if file_context_str else f"No specific {"code" if doc_mode == "developer" else "technical"} snippets provided for this abstraction."}
 
-Instructions:
+{mode_specific_instructions}
+
+General Instructions:
 - Start with `# Chapter {chapter_num}: {abstraction_name}`
-- Begin with high-level motivation and a concrete use case
-- Break complex concepts into beginner-friendly pieces
-- Keep code blocks BELOW 10 lines - break longer ones into pieces
-- Use mermaid diagrams for complex flows (max 5 participants)
+- Begin with {" high-level technical motivation" if doc_mode == "developer" else "why users care about this feature"}
+- {"Keep code blocks under 15 lines - break longer ones into focused pieces" if doc_mode == "developer" else "NO CODE BLOCKS - focus on user actions and outcomes"}
+- Use mermaid diagrams {"for technical flows (max 5-7 participants)" if doc_mode == "developer" else "for user journeys (keep simple and clear)"}
 - Link to other chapters using Markdown links from the structure above
-- Use analogies and examples throughout
-- End with a brief conclusion and transition to next chapter
+- Use {"technical examples and actual code references" if doc_mode == "developer" else "analogies, user stories, and real-world scenarios"}
+- End with a brief {"technical summary" if doc_mode == "developer" else "conclusion about user benefits"} and transition to next chapter
 
 Output only the Markdown content (no ```markdown``` tags):
 """
@@ -695,14 +1148,18 @@ Output only the Markdown content (no ```markdown``` tags):
     def post(self, shared, prep_res, exec_res_list):
         shared["chapters"] = exec_res_list
         del self.chapters_written_so_far
-        print(f"✓ Finished writing {len(exec_res_list)} chapters")
+        doc_mode = shared.get("doc_mode", "developer")
+        print(f"✓ Finished writing {len(exec_res_list)} chapters ({doc_mode} mode)")
 
 
 class CombineTutorial(Node):
     def prep(self, shared):
         project_name = shared["project_name"]
         output_base_dir = shared.get("output_dir", "output")
-        output_path = os.path.join(output_base_dir, project_name)
+        doc_mode = shared.get("doc_mode", "developer")
+        
+        # Add doc_mode suffix to output directory
+        output_path = os.path.join(output_base_dir, f"{project_name}_{doc_mode}")
         repo_url = shared.get("repo_url")
 
         enable_jekyll = shared.get("enable_jekyll", True)
@@ -736,19 +1193,28 @@ class CombineTutorial(Node):
         index_content = ""
         if enable_jekyll:
             index_content += generate_jekyll_front_matter(
-                title=project_name, nav_order=jekyll_nav_order, has_children=True
+                title=f"{project_name} ({doc_mode.capitalize()} Guide)", 
+                nav_order=jekyll_nav_order, 
+                has_children=True
             )
 
-        index_content += f"# Tutorial: {project_name}\n\n"
+        doc_type_label = "Developer Documentation" if doc_mode == "developer" else "User Guide"
+        index_content += f"# {doc_type_label}: {project_name}\n\n"
 
         if enable_jekyll:
-            index_content += f"> This tutorial is AI-generated! To learn more, check out [AI Codebase Knowledge Builder](https://github.com/The-Pocket/Tutorial-Codebase-Knowledge)\n\n"
+            index_content += f"> This {doc_type_label.lower()} is AI-generated! To learn more, check out [AI Codebase Knowledge Builder](https://github.com/The-Pocket/Tutorial-Codebase-Knowledge)\n\n"
+
+        if doc_mode == "user":
+            index_content += "📘 **This guide is designed for end-users and stakeholders.** It focuses on features, workflows, and business value without technical jargon.\n\n"
+        else:
+            index_content += "🔧 **This guide is designed for developers.** It focuses on technical architecture, code structure, and implementation details.\n\n"
 
         index_content += f"{relationships_data['summary']}\n\n"
 
         if repo_url:
             index_content += f"**Source Repository:** [{repo_url}]({repo_url})\n\n"
 
+        index_content += f"## {doc_type_label} Structure\n\n"
         index_content += "```mermaid\n" + mermaid_diagram + "\n```\n\n"
         index_content += f"## Chapters\n\n"
 
@@ -765,7 +1231,9 @@ class CombineTutorial(Node):
                 chapter_content = ""
                 if enable_jekyll:
                     chapter_content += generate_jekyll_front_matter(
-                        title=abstraction_name, parent=project_name, nav_order=i + 1
+                        title=abstraction_name, 
+                        parent=f"{project_name} ({doc_mode.capitalize()} Guide)", 
+                        nav_order=i + 1
                     )
 
                 chapter_content += chapters_content[i]
@@ -793,6 +1261,7 @@ class CombineTutorial(Node):
             "index_content": index_content,
             "chapter_files": chapter_files,
             "enable_jekyll": enable_jekyll,
+            "doc_mode": doc_mode,
         }
 
     def exec(self, prep_res):
@@ -800,8 +1269,9 @@ class CombineTutorial(Node):
         index_content = prep_res["index_content"]
         chapter_files = prep_res["chapter_files"]
         enable_jekyll = prep_res["enable_jekyll"]
+        doc_mode = prep_res["doc_mode"]
 
-        print(f"Combining tutorial into: {output_path}")
+        print(f"Combining {doc_mode} documentation into: {output_path}")
         if enable_jekyll:
             print(f"  ✓ Jekyll front matter enabled")
 
@@ -822,4 +1292,5 @@ class CombineTutorial(Node):
 
     def post(self, shared, prep_res, exec_res):
         shared["final_output_dir"] = exec_res
-        print(f"\n✓ Tutorial generation complete! Files in: {exec_res}")
+        doc_mode = shared.get("doc_mode", "developer")
+        print(f"\n✓ {doc_mode.capitalize()} documentation generation complete! Files in: {exec_res}")
