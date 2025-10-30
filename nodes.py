@@ -185,7 +185,7 @@ class IdentifyAbstractions(Node):
         project_name = shared["project_name"]
         language = shared.get("language", "english")
         use_cache = shared.get("use_cache", True)
-        max_abstraction_num = shared.get("max_abstraction_num", 10)
+        max_abstraction_num = shared.get("max_abstraction_num", 100)
         doc_mode = shared.get("doc_mode", "developer")
 
         token_budget = TOKEN_BUDGETS["identify_abstractions"]
@@ -371,7 +371,9 @@ Format the output as a YAML list of dictionaries:
                 }
             )
 
-        print(f"✓ Identified {len(validated_abstractions)} abstractions ({doc_mode} mode)")
+        print(
+            f"✓ Identified {len(validated_abstractions)} abstractions ({doc_mode} mode)"
+        )
         return validated_abstractions
 
     def post(self, shared, prep_res, exec_res):
@@ -443,7 +445,9 @@ class AnalyzeAndOrderChapters(Node):
             use_cache,
             doc_mode,
         ) = prep_res
-        print(f"Analyzing relationships and ordering chapters using LLM (mode: {doc_mode})...")
+        print(
+            f"Analyzing relationships and ordering chapters using LLM (mode: {doc_mode})..."
+        )
 
         language_instruction = ""
         lang_hint = ""
@@ -717,7 +721,9 @@ class WriteChapters(BatchNode):
                     f"Warning: Invalid abstraction index {abstraction_index} in chapter_order"
                 )
 
-        print(f"Preparing to write {len(items_to_process)} chapters ({doc_mode} mode)...")
+        print(
+            f"Preparing to write {len(items_to_process)} chapters ({doc_mode} mode)..."
+        )
         return items_to_process
 
     def exec(self, item):
@@ -728,8 +734,10 @@ class WriteChapters(BatchNode):
         language = item.get("language", "english")
         use_cache = item.get("use_cache", True)
         doc_mode = item.get("doc_mode", "developer")
-        
-        print(f"Writing chapter {chapter_num} ({doc_mode} mode): {abstraction_name[:50]}...")
+
+        print(
+            f"Writing chapter {chapter_num} ({doc_mode} mode): {abstraction_name[:50]}..."
+        )
 
         token_budget = TOKEN_BUDGETS["write_chapter"]
         file_context_str = get_optimized_content_for_indices(
@@ -1114,7 +1122,7 @@ Context from previous chapters:
 {previous_chapters_summary if previous_chapters_summary else "This is the first chapter."}
 
 {"Relevant Code Snippets:" if doc_mode == "developer" else "Relevant Technical Context (translate to user perspective):"}
-{file_context_str if file_context_str else f"No specific {"code" if doc_mode == "developer" else "technical"} snippets provided for this abstraction."}
+{file_context_str if file_context_str else f"No specific {'code' if doc_mode == 'developer' else 'technical'} snippets provided for this abstraction."}
 
 {mode_specific_instructions}
 
@@ -1157,7 +1165,7 @@ class CombineTutorial(Node):
         project_name = shared["project_name"]
         output_base_dir = shared.get("output_dir", "output")
         doc_mode = shared.get("doc_mode", "developer")
-        
+
         # Add doc_mode suffix to output directory
         output_path = os.path.join(output_base_dir, f"{project_name}_{doc_mode}")
         repo_url = shared.get("repo_url")
@@ -1193,12 +1201,14 @@ class CombineTutorial(Node):
         index_content = ""
         if enable_jekyll:
             index_content += generate_jekyll_front_matter(
-                title=f"{project_name} ({doc_mode.capitalize()} Guide)", 
-                nav_order=jekyll_nav_order, 
-                has_children=True
+                title=f"{project_name} ({doc_mode.capitalize()} Guide)",
+                nav_order=jekyll_nav_order,
+                has_children=True,
             )
 
-        doc_type_label = "Developer Documentation" if doc_mode == "developer" else "User Guide"
+        doc_type_label = (
+            "Developer Documentation" if doc_mode == "developer" else "User Guide"
+        )
         index_content += f"# {doc_type_label}: {project_name}\n\n"
 
         if enable_jekyll:
@@ -1231,9 +1241,9 @@ class CombineTutorial(Node):
                 chapter_content = ""
                 if enable_jekyll:
                     chapter_content += generate_jekyll_front_matter(
-                        title=abstraction_name, 
-                        parent=f"{project_name} ({doc_mode.capitalize()} Guide)", 
-                        nav_order=i + 1
+                        title=abstraction_name,
+                        parent=f"{project_name} ({doc_mode.capitalize()} Guide)",
+                        nav_order=i + 1,
                     )
 
                 chapter_content += chapters_content[i]
@@ -1293,4 +1303,6 @@ class CombineTutorial(Node):
     def post(self, shared, prep_res, exec_res):
         shared["final_output_dir"] = exec_res
         doc_mode = shared.get("doc_mode", "developer")
-        print(f"\n✓ {doc_mode.capitalize()} documentation generation complete! Files in: {exec_res}")
+        print(
+            f"\n✓ {doc_mode.capitalize()} documentation generation complete! Files in: {exec_res}"
+        )
