@@ -123,8 +123,8 @@ def main():
     parser.add_argument(
         "--max-abstractions",
         type=int,
-        default=10,
-        help="Maximum number of abstractions to identify (default: 10)",
+        default=100,
+        help="Maximum number of abstractions to identify (default: 100)",
     )
     # Add doc_mode parameter to control documentation style
     parser.add_argument(
