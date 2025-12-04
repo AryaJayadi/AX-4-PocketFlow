@@ -1014,12 +1014,17 @@ class CombineTutorial(Node):
         output_base_dir = shared.get("output_dir", "output")
         doc_mode = shared.get("doc_mode", "developer")
 
-        # Add doc_mode suffix to output directory
-        output_path = os.path.join(output_base_dir, f"{project_name}_{doc_mode}")
-        repo_url = shared.get("repo_url")
+        # MkDocs Structure:
+        # /output/project_name/
+        #   ├── mkdocs.yml
+        #   └── docs/
+        #       ├── index.md
+        #       └── 01_chapter.md
 
-        enable_jekyll = shared.get("enable_jekyll", True)
-        jekyll_nav_order = shared.get("jekyll_nav_order", 1)
+        base_output_path = os.path.join(output_base_dir, f"{project_name}_{doc_mode}")
+        docs_output_path = os.path.join(base_output_path, "docs")
+
+        enable_mkdocs = shared.get("enable_mkdocs", True)
 
         relationships_data = shared["relationships"]
         chapter_order = shared["chapter_order"]
@@ -1047,100 +1052,80 @@ class CombineTutorial(Node):
 
         # Prepare index.md
         index_content = ""
-        if enable_jekyll:
-            index_content += generate_jekyll_front_matter(
-                title=f"{project_name} ({doc_mode.capitalize()} Guide)",
-                nav_order=jekyll_nav_order,
-                has_children=True,
+        if doc_mode == "user":
+            index_content += '!!! tip "User Guide"\n    **This guide is designed for end-users.**\n\n'
+        else:
+            index_content += (
+                '!!! info "Developer Guide"\n    **This guide is for developers.**\n\n'
             )
 
-        doc_type_label = (
-            "Developer Documentation" if doc_mode == "developer" else "User Guide"
-        )
-        index_content += f"# {doc_type_label}: {project_name}\n\n"
-
-        if doc_mode == "user":
-            index_content += "📘 **This guide is designed for end-users and stakeholders.** It focuses on features, workflows, and business value without technical jargon.\n\n"
-        else:
-            index_content += "🔧 **This guide is designed for developers.** It focuses on technical architecture, code structure, and implementation details.\n\n"
-
         index_content += f"{relationships_data['summary']}\n\n"
+        index_content += f"## Structure\n\n```mermaid\n{mermaid_diagram}\n```\n"
 
-        if repo_url:
-            index_content += f"**Source Repository:** [{repo_url}]({repo_url})\n\n"
-
-        index_content += f"## {doc_type_label} Structure\n\n"
-        index_content += "```mermaid\n" + mermaid_diagram + "\n```\n\n"
-        index_content += f"## Chapters\n\n"
-
+        # Prepare Chapter Files and Navigation
         chapter_files = []
+        nav_structure = [{"Home": "index.md"}]  # Start with Home
+
         for i, abstraction_index in enumerate(chapter_order):
             if 0 <= abstraction_index < len(abstractions) and i < len(chapters_content):
-                abstraction_name = abstractions[abstraction_index]["name"]
-                safe_name = "".join(
-                    c if c.isalnum() else "_" for c in abstraction_name
-                ).lower()
+                name = abstractions[abstraction_index]["name"]
+                # Clean filename
+                safe_name = "".join(c if c.isalnum() else "_" for c in name).lower()
                 filename = f"{i + 1:02d}_{safe_name}.md"
-                index_content += f"{i + 1}. [{abstraction_name}]({filename})\n"
 
-                chapter_content = ""
-                if enable_jekyll:
-                    chapter_content += generate_jekyll_front_matter(
-                        title=abstraction_name,
-                        parent=f"{project_name} ({doc_mode.capitalize()} Guide)",
-                        nav_order=i + 1,
-                    )
-
-                chapter_content += chapters_content[i]
-
-                if not chapter_content.endswith("\n\n"):
-                    chapter_content += "\n\n"
-
+                # Add to file list
                 chapter_files.append(
-                    {
-                        "filename": filename,
-                        "content": chapter_content,
-                        "title": abstraction_name,
-                    }
+                    {"filename": filename, "content": chapters_content[i]}
                 )
-            else:
-                print(
-                    f"Warning: Mismatch at chapter {i}, abstraction index {abstraction_index}"
-                )
+
+                # Add to Navigation
+                nav_structure.append({name: filename})
 
         return {
-            "output_path": output_path,
+            "base_output_path": base_output_path,
+            "docs_output_path": docs_output_path,
             "index_content": index_content,
             "chapter_files": chapter_files,
-            "enable_jekyll": enable_jekyll,
+            "nav_structure": nav_structure,
+            "enable_mkdocs": enable_mkdocs,
+            "project_name": project_name,
             "doc_mode": doc_mode,
         }
 
     def exec(self, prep_res):
-        output_path = prep_res["output_path"]
-        index_content = prep_res["index_content"]
-        chapter_files = prep_res["chapter_files"]
-        enable_jekyll = prep_res["enable_jekyll"]
-        doc_mode = prep_res["doc_mode"]
+        base_path = prep_res["base_output_path"]
+        docs_path = prep_res["docs_output_path"]
 
-        print(f"Combining {doc_mode} documentation into: {output_path}")
-        if enable_jekyll:
-            print(f"  ✓ Jekyll front matter enabled")
+        # Create directories
+        os.makedirs(docs_path, exist_ok=True)
 
-        os.makedirs(output_path, exist_ok=True)
+        # Write docs/index.md
+        with open(os.path.join(docs_path, "index.md"), "w", encoding="utf-8") as f:
+            f.write(prep_res["index_content"])
 
-        index_filepath = os.path.join(output_path, "index.md")
-        with open(index_filepath, "w", encoding="utf-8") as f:
-            f.write(index_content)
-        print(f"  ✓ Wrote index.md")
+        # Write Chapter Files
+        for chap in prep_res["chapter_files"]:
+            with open(
+                os.path.join(docs_path, chap["filename"]), "w", encoding="utf-8"
+            ) as f:
+                f.write(chap["content"])
 
-        for chapter_info in chapter_files:
-            chapter_filepath = os.path.join(output_path, chapter_info["filename"])
-            with open(chapter_filepath, "w", encoding="utf-8") as f:
-                f.write(chapter_info["content"])
-        print(f"  ✓ Wrote {len(chapter_files)} chapter files")
+        # Write mkdocs.yml
+        if prep_res["enable_mkdocs"]:
+            mkdocs_content = generate_mkdocs_config(
+                prep_res["project_name"],
+                prep_res["doc_mode"],
+                prep_res["nav_structure"],
+            )
+            with open(
+                os.path.join(base_path, "mkdocs.yml"), "w", encoding="utf-8"
+            ) as f:
+                f.write(mkdocs_content)
 
-        return output_path
+        print(f"✓ Documentation generated in: {base_path}")
+        print(f"✓ To serve: cd {base_path} && mkdocs serve")
+
+        return base_path
 
     def post(self, shared, prep_res, exec_res):
         shared["final_output_dir"] = exec_res
