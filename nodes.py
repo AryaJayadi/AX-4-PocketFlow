@@ -19,6 +19,46 @@ except Exception:
     pass
 
 
+def generate_mkdocs_config(project_name, doc_mode, nav_structure):
+    """Generate mkdocs.yml content with Material theme settings."""
+
+    # Determine icon based on mode
+    logo_icon = (
+        "material/code-braces"
+        if doc_mode == "developer"
+        else "material/book-open-page-variant"
+    )
+
+    config = {
+        "site_name": f"{project_name} Docs",
+        "theme": {
+            "name": "material",
+            "palette": {"scheme": "default", "primary": "indigo", "accent": "indigo"},
+            "features": [
+                "navigation.instant",
+                "navigation.tabs",
+                "navigation.sections",
+                "toc.integrate",
+                "content.code.copy",
+            ],
+            "icon": {"logo": logo_icon},
+        },
+        "markdown_extensions": [
+            "admonition",
+            "pymdownx.details",
+            "pymdownx.superfences",
+            "pymdownx.tabbed",
+            {"pymdownx.highlight": {"anchor_linenums": True}},
+            "pymdownx.inlinehilite",
+            "pymdownx.snippets",
+            "attr_list",
+            "md_in_html",
+        ],
+        "nav": nav_structure,
+    }
+    return yaml.dump(config, sort_keys=False)
+
+
 # ========= OPTIMIZED TOKEN BUDGETS =========
 # More aggressive budgeting with real-world measurements
 def _calculate_smart_token_budget():
