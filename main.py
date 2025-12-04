@@ -146,6 +146,11 @@ def main():
         default=1,
         help="Navigation order for the tutorial in Jekyll (default: 1)",
     )
+    parser.add_argument(
+        "--no-mkdocs",
+        action="store_true",
+        help="Disable automatic mkdocs.yml generation (default: generated)",
+    )
 
     args = parser.parse_args()
 
@@ -184,6 +189,7 @@ def main():
         # Jekyll configuration
         "enable_jekyll": not args.no_jekyll,
         "jekyll_nav_order": args.jekyll_nav_order,
+        "enable_mkdocs": not args.no_mkdocs,
         # Outputs will be populated by the nodes
         "files": [],
         "abstractions": [],
