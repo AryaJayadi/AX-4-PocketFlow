@@ -829,7 +829,8 @@ Example Admonition:
 
         # MODE-SPECIFIC INSTRUCTIONS
         if doc_mode == "developer":
-            mode_specific_instructions = f"""
+            mode_specific_instructions = (
+                """
 DEVELOPER MODE - Technical Documentation:
 
 Structure your chapter with these sections:
@@ -855,9 +856,10 @@ Style Guidelines:
 - Use mermaid diagrams for complex architectural flows (see examples below)
 - Link to related technical chapters
 - Keep code examples focused and well-commented
-
-{style_guide}
-
+"""
+                + "\n"
+                + style_guide
+                + """
 Example code block format:
 ```python
 # From src/auth/jwt_handler.py
@@ -892,6 +894,7 @@ Mermaid Diagram must be made with the latest syntax
 
 Choose the diagram type that best illustrates the technical concept being explained.
 """
+            )
         else:  # user mode
             mode_specific_instructions = f"""
 USER MODE - Business-Focused Documentation:
