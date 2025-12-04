@@ -799,9 +799,37 @@ class WriteChapters(BatchNode):
             lang_cap = language.capitalize()
             language_instruction = f"IMPORTANT: Write this ENTIRE tutorial chapter in **{lang_cap}**. Translate ALL generated content including explanations, examples, and technical terms into {lang_cap}.\n\n"
 
+        style_guide = """
+STYLE GUIDE (MkDocs Material):
+1. **Admonitions**: Use admonitions heavily for notes, warnings, and tips.
+   - Syntax: 
+     !!! note "Title"
+         Content here...
+     !!! warning "Critical Info"
+         Content here...
+     !!! tip "Best Practice"
+         Content here...
+
+2. **Content Tabs**: Use tabs when showing multiple options (e.g., OS types, Config formats).
+   - Syntax:
+     === "Option A"
+         Content A
+     === "Option B"
+         Content B
+
+3. **Code Blocks**: Always specify the language.
+   - ```python, ```javascript, etc.
+   
+4. **Diagrams**: Keep using Mermaid as requested previously.
+
+Example Admonition:
+!!! warning "Rate Limiting"
+    This endpoint is limited to 100 req/min. Exceeding this will return a 429 status.
+"""
+
         # MODE-SPECIFIC INSTRUCTIONS
         if doc_mode == "developer":
-            mode_specific_instructions = """
+            mode_specific_instructions = f"""
 DEVELOPER MODE - Technical Documentation:
 
 Structure your chapter with these sections:
@@ -812,6 +840,8 @@ Structure your chapter with these sections:
    - Code snippets showing important methods (keep each snippet under 15 lines)
    - Explanation of algorithms or logic
    - Design patterns used
+   - Use `!!! info "Key Logic"` callouts for important algorithms.
+   - Use Content Tabs if there are alternative implementations.
 5. **API Reference**: Key functions/methods with parameters and return types
 6. **Usage Examples**: Practical code examples showing how to use this component
 7. **Integration Points**: How this connects to other parts of the codebase
@@ -825,6 +855,8 @@ Style Guidelines:
 - Use mermaid diagrams for complex architectural flows (see examples below)
 - Link to related technical chapters
 - Keep code examples focused and well-commented
+
+{style_guide}
 
 Example code block format:
 ```python
@@ -840,239 +872,13 @@ def generate_token(user_id: str, expires_in: int = 3600) -> str:
         Signed JWT token string
     \"\"\"
     payload = {
-        'user_id': user_id,
+                "user_id": user_id,
         'exp': datetime.utcnow() + timedelta(seconds=expires_in)
     }
     return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 ```
 
-Mermaid Diagram Examples (Mermaid 11.6.0 Compatible):
-
-**1. Sequence Diagram** - For API calls, service interactions, authentication flows:
-```mermaid
-sequenceDiagram
-    participant Client
-    participant AuthService
-    participant Database
-    participant JWTHandler
-    
-    Client->>AuthService: POST /login
-    activate AuthService
-    AuthService->>Database: Verify credentials
-    activate Database
-    Database-->>AuthService: User data
-    deactivate Database
-    AuthService->>JWTHandler: Generate token
-    activate JWTHandler
-    JWTHandler-->>AuthService: JWT token
-    deactivate JWTHandler
-    AuthService-->>Client: 200 OK + token
-    deactivate AuthService
-```
-
-**2. Flowchart** - For algorithms, decision logic, processing flows:
-```mermaid
-flowchart TD
-    Start([Request Received]) --> ValidateInput{Valid Input?}
-    ValidateInput -->|No| ReturnError[Return 400 Error]
-    ValidateInput -->|Yes| CheckAuth{Authenticated?}
-    CheckAuth -->|No| ReturnUnauth[Return 401 Unauthorized]
-    CheckAuth -->|Yes| ProcessData[Process Request]
-    ProcessData --> CheckDB{Data Exists?}
-    CheckDB -->|No| CreateNew[Create New Record]
-    CheckDB -->|Yes| UpdateExisting[Update Existing]
-    CreateNew --> SaveDB[(Save to Database)]
-    UpdateExisting --> SaveDB
-    SaveDB --> ReturnSuccess[Return 200 Success]
-    ReturnError --> End([End])
-    ReturnUnauth --> End
-    ReturnSuccess --> End
-```
-
-**3. Class Diagram** - For object-oriented architecture, inheritance, relationships:
-```mermaid
-classDiagram
-    class BaseModel {
-        +UUID id
-        +DateTime created_at
-        +DateTime updated_at
-        +save() void
-        +delete() void
-        +to_dict() dict
-    }
-    
-    class User {
-        +String email
-        +String password_hash
-        +String role
-        +authenticate(password) bool
-        +generate_token() string
-    }
-    
-    class Order {
-        +UUID user_id
-        +Decimal total_amount
-        +String status
-        +List~OrderItem~ items
-        +calculate_total() Decimal
-        +process_payment() bool
-    }
-    
-    class OrderItem {
-        +UUID product_id
-        +Integer quantity
-        +Decimal price
-        +get_subtotal() Decimal
-    }
-    
-    BaseModel <|-- User
-    BaseModel <|-- Order
-    BaseModel <|-- OrderItem
-    User "1" --> "0..*" Order : places
-    Order "1" --> "1..*" OrderItem : contains
-```
-
-**4. State Diagram** - For state machines, workflow states, lifecycle management:
-```mermaid
-stateDiagram-v2
-    [*] --> Draft
-    Draft --> PendingReview : submit()
-    PendingReview --> Approved : approve()
-    PendingReview --> Rejected : reject()
-    PendingReview --> Draft : request_changes()
-    Rejected --> Draft : revise()
-    Approved --> Published : publish()
-    Published --> Archived : archive()
-    Archived --> [*]
-    
-    Draft : Entry: initialize_data()
-    Draft : Do: allow_edits()
-    PendingReview : Entry: notify_reviewers()
-    Approved : Entry: log_approval()
-    Published : Entry: make_public()
-```
-
-**5. Entity Relationship Diagram** - For database schema, data models:
-```mermaid
-erDiagram
-    USER ||--o{ ORDER : places
-    USER {
-        uuid id PK
-        string email UK
-        string password_hash
-        string role
-        datetime created_at
-    }
-    
-    ORDER ||--|{ ORDER_ITEM : contains
-    ORDER {
-        uuid id PK
-        uuid user_id FK
-        decimal total_amount
-        string status
-        datetime created_at
-    }
-    
-    ORDER_ITEM }o--|| PRODUCT : references
-    ORDER_ITEM {
-        uuid id PK
-        uuid order_id FK
-        uuid product_id FK
-        integer quantity
-        decimal price
-    }
-    
-    PRODUCT {
-        uuid id PK
-        string name
-        string description
-        decimal price
-        integer stock
-    }
-```
-
-**6. Architecture Diagram (C4 Style)** - For system architecture, component relationships:
-```mermaid
-graph TB
-    subgraph "Client Layer"
-        WebApp[Web Application]
-        MobileApp[Mobile App]
-    end
-    
-    subgraph "API Gateway"
-        Gateway[API Gateway<br/>Rate Limiting, Auth]
-    end
-    
-    subgraph "Service Layer"
-        AuthSvc[Auth Service<br/>JWT, OAuth]
-        OrderSvc[Order Service<br/>Business Logic]
-        PaymentSvc[Payment Service<br/>Stripe Integration]
-    end
-    
-    subgraph "Data Layer"
-        PostgreSQL[(PostgreSQL<br/>User & Order Data)]
-        Redis[(Redis<br/>Cache & Sessions)]
-        S3[(S3<br/>File Storage)]
-    end
-    
-    WebApp --> Gateway
-    MobileApp --> Gateway
-    Gateway --> AuthSvc
-    Gateway --> OrderSvc
-    OrderSvc --> PaymentSvc
-    AuthSvc --> PostgreSQL
-    AuthSvc --> Redis
-    OrderSvc --> PostgreSQL
-    OrderSvc --> Redis
-    PaymentSvc --> S3
-    
-    style AuthSvc fill:#e1f5ff
-    style OrderSvc fill:#e1f5ff
-    style PaymentSvc fill:#e1f5ff
-    style PostgreSQL fill:#ffe1e1
-    style Redis fill:#ffe1e1
-```
-
-**7. Timeline Diagram** - For deployment pipelines, version history, event sequences:
-```mermaid
-timeline
-    title Development Pipeline
-    section Development
-        Feature Branch : Code Changes
-                      : Unit Tests
-                      : Code Review
-    section Testing
-        Merge to Main : Integration Tests
-                     : Security Scan
-                     : Performance Tests
-    section Staging
-        Deploy Staging : End-to-End Tests
-                      : UAT Testing
-    section Production
-        Deploy Prod : Health Check
-                   : Monitor Metrics
-                   : Rollback Ready
-```
-
-**8. Git Graph** - For branching strategy, release management:
-```mermaid
-gitgraph
-    commit id: "Initial commit"
-    branch develop
-    checkout develop
-    commit id: "Add auth module"
-    branch feature/payment
-    checkout feature/payment
-    commit id: "Implement payment API"
-    commit id: "Add payment tests"
-    checkout develop
-    merge feature/payment
-    commit id: "Update docs"
-    checkout main
-    merge develop tag: "v1.0.0"
-    checkout develop
-    commit id: "Start v1.1 features"
-```
+Mermaid Diagram must be made with the latest syntax
 
 **Diagram Selection Guidelines:**
 - **Sequence Diagrams**: API flows, authentication, multi-service interactions
@@ -1087,7 +893,7 @@ gitgraph
 Choose the diagram type that best illustrates the technical concept being explained.
 """
         else:  # user mode
-            mode_specific_instructions = """
+            mode_specific_instructions = f"""
 USER MODE - Business-Focused Documentation:
 
 Structure your chapter with these sections:
@@ -1110,6 +916,8 @@ Style Guidelines:
 - Explain benefits at each step
 - Use mermaid diagrams for USER JOURNEYS
 - Link to related feature chapters
+
+{style_guide}
 
 Example user workflow format:
 **Signing Up for an Account:**
@@ -1167,7 +975,7 @@ Context from previous chapters:
 {mode_specific_instructions}
 
 General Instructions:
-- Start with `# Chapter {chapter_num}: {abstraction_name}`
+- Start with `# Chapter {chapter_num}: {abstraction_name} (Do not include "Chapter X" in the title, it's handled by nav).`
 - Begin with {" high-level technical motivation" if doc_mode == "developer" else "why users care about this feature"}
 - {"Keep code blocks under 15 lines - break longer ones into focused pieces" if doc_mode == "developer" else "NO CODE BLOCKS - focus on user actions and outcomes"}
 - Use mermaid diagrams {"for technical flows (max 5-7 participants)" if doc_mode == "developer" else "for user journeys (keep simple and clear)"}
