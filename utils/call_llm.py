@@ -759,6 +759,7 @@ def _call_openai(prompt: str) -> str:
     """
     Call OpenAI API directly.
     Env vars: OPEN_AI_MODEL, OPEN_AI_API_KEY, OPEN_AI_BASE_URL (optional)
+    Optional: GPT5_REASONING_EFFORT, GPT5_VERBOSITY
     """
     model = os.environ.get("OPEN_AI_MODEL")
     api_key = os.environ.get("OPEN_AI_API_KEY")
@@ -779,8 +780,19 @@ def _call_openai(prompt: str) -> str:
     _admit_or_wait(messages, model=model, logger=logger)
 
     payload = {"model": model, "messages": messages}
+
     if not model.startswith("gpt-5"):
         payload["temperature"] = 0.7
+    else:
+        reasoning_effort = os.environ.get(
+            "GPT5_REASONING_EFFORT"
+        )  # none | minimal | low | medium | high (model-dependent)
+        verbosity = os.environ.get("GPT5_VERBOSITY")  # low | medium | high
+
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        if verbosity:
+            payload["verbosity"] = verbosity
 
     try:
         response = _post_with_backoff(url, headers, payload, logger=logger)
